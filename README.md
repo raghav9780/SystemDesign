@@ -11,8 +11,8 @@ Mentor: **Alex** | Started: 2026-06-11 | Level at start: Absolute Beginner
 |-----|-------|-------|--------|-------|
 | 1 | Scalability: Vertical vs Horizontal | 1 — Foundations | ✅ Done | 7/10 |
 | 2 | Load Balancers (L4/L7, algorithms, sticky sessions) | 1 — Foundations | ✅ Done | 8/10 |
-| 3 | Caching (cache-aside, write-through/back, eviction, Redis vs Memcached) | 1 | ⬜ Next | — |
-| 4 | CDN & DNS (Anycast, TTL) | 1 | ⬜ | — |
+| 3 | Caching (cache-aside, write-through/back, eviction, Redis vs Memcached) | 1 | ✅ Done | 6.5 → 8/10 (retry) |
+| 4 | CDN & DNS (Anycast, TTL) | 1 | ⬜ Next | — |
 | 5 | Databases Deep Dive — SQL, ACID, Transactions | 1 | ⬜ | — |
 | 6 | NoSQL Deep Dive — types & when to use | 1 | ⬜ | — |
 | 7 | CAP Theorem + PACELC | 1 | ⬜ | — |
@@ -51,4 +51,6 @@ Mentor: **Alex** | Started: 2026-06-11 | Level at start: Absolute Beginner
 - ⭐ SIGNATURE LESSON (3 days running): **state lives in a SHARED store, never on the server.**
 
 ## 📈 Stats
-- Days done: 2/60 | Avg score: **7.5/10** | Trend: ↗ (7 → 8)
+- Days done: 3/60 | Avg score: **7.7/10** | Trend: 7 → 8 → 6.5 → 8 (retry)
+- ✅ Naming + finish-the-thought gaps improving fast (Day 3 retry proved it).
+- 🆕 New edge: match strategy to PROBLEM SHAPE (write-back = writes, not expensive computes).
