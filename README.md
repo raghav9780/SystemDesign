@@ -54,4 +54,3 @@ Mentor: **Alex** | Started: 2026-06-11 | Level at start: Absolute Beginner
 - Days done: 3/60 | Avg score: **7.7/10** | Trend: 7 → 8 → 6.5 → 8 (retry)
 - ✅ Naming + finish-the-thought gaps improving fast (Day 3 retry proved it).
 - 🆕 New edge: match strategy to PROBLEM SHAPE (write-back = writes, not expensive computes).
-added
