@@ -1,7 +1,7 @@
 # 🎯 System Design Interview Prep — 60-Day Program
-Mentor: **Alex** | Started: 2026-06-11 | Level at start: Absolute Beginner
+Author: **Raghav Gupta** | Mentor: Alex | Started: 2026-06-11 | Level at start: Absolute Beginner
 
-> Quick-recap notes, day by day. Each folder = one day, point-to-point only.
+> My own quick-recap notes, written by me, day by day. Each folder = one day, point-to-point only.
 
 ---
 
@@ -12,8 +12,8 @@ Mentor: **Alex** | Started: 2026-06-11 | Level at start: Absolute Beginner
 | 1 | Scalability: Vertical vs Horizontal | 1 — Foundations | ✅ Done | 7/10 |
 | 2 | Load Balancers (L4/L7, algorithms, sticky sessions) | 1 — Foundations | ✅ Done | 8/10 |
 | 3 | Caching (cache-aside, write-through/back, eviction, Redis vs Memcached) | 1 | ✅ Done | 6.5 → 8/10 (retry) |
-| 4 | CDN & DNS (Anycast, TTL) | 1 | ⬜ Next | — |
-| 5 | Databases Deep Dive — SQL, ACID, Transactions | 1 | ⬜ | — |
+| 4 | CDN & DNS (Anycast, TTL) | 1 | ✅ Done | 8/10 |
+| 5 | Databases Deep Dive — SQL, ACID, Transactions | 1 | ⬜ Next | — |
 | 6 | NoSQL Deep Dive — types & when to use | 1 | ⬜ | — |
 | 7 | CAP Theorem + PACELC | 1 | ⬜ | — |
 | 8 | Replication (master-slave, multi-master, sync/async) | 1 | ⬜ | — |
@@ -51,6 +51,7 @@ Mentor: **Alex** | Started: 2026-06-11 | Level at start: Absolute Beginner
 - ⭐ SIGNATURE LESSON (3 days running): **state lives in a SHARED store, never on the server.**
 
 ## 📈 Stats
-- Days done: 3/60 | Avg score: **7.7/10** | Trend: 7 → 8 → 6.5 → 8 (retry)
-- ✅ Naming + finish-the-thought gaps improving fast (Day 3 retry proved it).
-- 🆕 New edge: match strategy to PROBLEM SHAPE (write-back = writes, not expensive computes).
+- Days done: 4/60 | Avg score: **7.6/10** | Trend: 7 → 8 → 8(retry) → 8
+- ✅ Naming discipline now CONSISTENT across full answers.
+- 🆕 Sharpened edge: prescribe the SPECIFIC ACTION + finish the FULL loop
+  (Q3 "lower TTL in advance"; Q4 include response+render, not just HTTP request).
