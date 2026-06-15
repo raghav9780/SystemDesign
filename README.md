@@ -13,8 +13,8 @@ Author: **Raghav Gupta** | Mentor: Alex | Started: 2026-06-11 | Level at start: 
 | 2 | Load Balancers (L4/L7, algorithms, sticky sessions) | 1 — Foundations | ✅ Done | 8/10 |
 | 3 | Caching (cache-aside, write-through/back, eviction, Redis vs Memcached) | 1 | ✅ Done | 6.5 → 8/10 (retry) |
 | 4 | CDN & DNS (Anycast, TTL) | 1 | ✅ Done | 8/10 |
-| 5 | Databases Deep Dive — SQL, ACID, Transactions | 1 | ⬜ Next | — |
-| 6 | NoSQL Deep Dive — types & when to use | 1 | ⬜ | — |
+| 5 | Databases Deep Dive — SQL, ACID, Transactions | 1 | ✅ Done | 7.5/10 (re-graded) |
+| 6 | NoSQL Deep Dive — types & when to use | 1 | ⬜ Next | — |
 | 7 | CAP Theorem + PACELC | 1 | ⬜ | — |
 | 8 | Replication (master-slave, multi-master, sync/async) | 1 | ⬜ | — |
 | 9 | Sharding & Partitioning (hotspot problem) | 1 | ⬜ | — |
@@ -51,7 +51,8 @@ Author: **Raghav Gupta** | Mentor: Alex | Started: 2026-06-11 | Level at start: 
 - ⭐ SIGNATURE LESSON (3 days running): **state lives in a SHARED store, never on the server.**
 
 ## 📈 Stats
-- Days done: 4/60 | Avg score: **7.6/10** | Trend: 7 → 8 → 8(retry) → 8
-- ✅ Naming discipline now CONSISTENT across full answers.
-- 🆕 Sharpened edge: prescribe the SPECIFIC ACTION + finish the FULL loop
-  (Q3 "lower TTL in advance"; Q4 include response+render, not just HTTP request).
+- Days done: 5/60 | Avg score: **7.8/10** | Trend: 7 → 8 → 8(retry) → 8 → 7.5
+- Day 5 re-graded 6.5→7.5: the brief omitted "lost update", so the misname wasn't fully on me.
+- 🎯 Concept mastery solid; precision of vocabulary is the gap between 7.5 and 9.
+- 📌 INTERVIEW SKILL: when pushed past your prep, reason aloud + hedge the name
+  ("a concurrency anomaly where both txns read stale state") — that still scores.
