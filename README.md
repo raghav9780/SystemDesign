@@ -15,8 +15,8 @@ Author: **Raghav Gupta** | Mentor: Alex | Started: 2026-06-11 | Level at start: 
 | 4 | CDN & DNS (Anycast, TTL) | 1 | ✅ Done | 8/10 |
 | 5 | Databases Deep Dive — SQL, ACID, Transactions | 1 | ✅ Done | 7.5/10 (re-graded) |
 | 6 | NoSQL Deep Dive — types & when to use | 1 | ✅ Done | 8/10 |
-| 7 | CAP Theorem + PACELC | 1 | ⬜ Next | — |
-| 8 | Replication (master-slave, multi-master, sync/async) | 1 | ⬜ | — |
+| 7 | CAP Theorem + PACELC | 1 | ✅ Done | 7.5/10 |
+| 8 | Replication (master-slave, multi-master, sync/async) | 1 | ⬜ Next | — |
 | 9 | Sharding & Partitioning (hotspot problem) | 1 | ⬜ | — |
 | 10 | Indexing (B-Tree, LSM, inverted, composite) | 1 | ⬜ | — |
 | 11 | Message Queues & Event Streaming (Kafka, RabbitMQ, SQS) | 1 | ⬜ | — |
@@ -51,8 +51,10 @@ Author: **Raghav Gupta** | Mentor: Alex | Started: 2026-06-11 | Level at start: 
 - ⭐ SIGNATURE LESSON (3 days running): **state lives in a SHARED store, never on the server.**
 
 ## 📈 Stats
-- Days done: 6/60 | Avg score: **7.8/10** | Trend: 7 → 8 → 8(retry) → 8 → 7.5 → 8
-- 🎯 Concept mastery solid; gap is now pure INTERVIEW CRAFT:
+- Days done: 7/60 | Avg score: **7.8/10** | Trend: 7 → 8 → 8(retry) → 8 → 7.5 → 8 → 7.5
+- 🎯 Concept mastery solid; gap is INTERVIEW CRAFT + COMPLETENESS:
   (1) name the category not just the example, (2) structure answers / don't ramble,
-  (3) justify by CONSEQUENCE not incidental facts.
+  (3) justify by CONSEQUENCE, (4) answer EVERY part of a multi-part question,
+  (5) don't ask clarifying Qs whose answer is already given — answer them.
 - 📌 When pushed past prep, reason aloud + hedge the name — that still scores.
+- ✅ STRENGTH: CP/AP classification by consequence (Day 7: 3/3).
