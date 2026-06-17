@@ -20,8 +20,8 @@ Author: **Raghav Gupta** | Mentor: Alex | Started: 2026-06-11 | Level at start: 
 | 5 | Databases Deep Dive — SQL, ACID, Transactions | 1 | ✅ Done | 7.5/10 (re-graded) |
 | 6 | NoSQL Deep Dive — types & when to use | 1 | ✅ Done | 8/10 |
 | 7 | CAP Theorem + PACELC | 1 | ✅ Done | 7.5/10 |
-| 8 | Replication (master-slave, multi-master, sync/async) | 1 | ⬜ Next | — |
-| 9 | Sharding & Partitioning (hotspot problem) | 1 | ⬜ | — |
+| 8 | Replication (master-slave, multi-master, sync/async) | 1 | ✅ Done | 7/10 |
+| 9 | Sharding & Partitioning (hotspot problem) | 1 | ⬜ Next | — |
 | 10 | Indexing (B-Tree, LSM, inverted, composite) | 1 | ⬜ | — |
 | 11 | Message Queues & Event Streaming (Kafka, RabbitMQ, SQS) | 1 | ⬜ | — |
 | 12 | APIs (REST/GraphQL/gRPC, gateway, idempotency) | 1 | ⬜ | — |
@@ -74,7 +74,7 @@ Author: **Raghav Gupta** | Mentor: Alex | Started: 2026-06-11 | Level at start: 
 - ⭐ SIGNATURE LESSON (3 days running): **state lives in a SHARED store, never on the server.**
 
 ## 📈 Stats
-- Days done: 7/60 | Avg score: **7.8/10** | Trend: 7 → 8 → 8(retry) → 8 → 7.5 → 8 → 7.5
+- Days done: 8/60 | Avg score: **7.6/10** | Trend: 7 → 8 → 8(retry) → 8 → 7.5 → 8 → 7.5 → 7
 - 🎯 Concept mastery solid; gap is INTERVIEW CRAFT + COMPLETENESS:
   (1) name the category not just the example, (2) structure answers / don't ramble,
   (3) justify by CONSEQUENCE, (4) answer EVERY part of a multi-part question,
