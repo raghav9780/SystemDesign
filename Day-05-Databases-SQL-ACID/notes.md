@@ -87,10 +87,34 @@ A **transaction** = group of ops treated as one all-or-nothing unit.
 
 ---
 
-## ⚠️ PENDING (intentionally open — follow-up to attempt first)
-- **Deadlock** (referenced under Locking): Alice→Bob locks Alice then needs Bob;
-  Bob→Alice locks Bob then needs Alice → each waits forever for the other.
-  Full definition + prevention to be filled in AFTER I attempt the follow-up question.
+## ⭐ Deadlock (follow-up — RESOLVED)
+- **Definition:** two (or more) transactions each hold a lock the other needs, so each waits
+  forever for the other to release → neither can proceed. A *cyclic* wait-for dependency.
+- **Classic shape (mutual transfer):**
+  - Txn 1: transfer Alice→Bob → locks **Alice's** row, then asks for **Bob's**.
+  - Txn 2: transfer Bob→Alice → locks **Bob's** row, then asks for **Alice's**.
+  - Now 1 waits on 2's Bob-lock, 2 waits on 1's Alice-lock → cycle → deadlock.
+- **The 4 conditions (all must hold — Coffman conditions):**
+  1. **Mutual exclusion** — a lock is held by only one txn at a time.
+  2. **Hold-and-wait** — a txn holds one lock while requesting another.
+  3. **No preemption** — a lock can't be force-taken; only the holder releases it.
+  4. **Circular wait** — a cycle of txns each waiting on the next.
+  Break ANY one and deadlock is impossible.
+- **How the DB handles it = DETECT + recover** (default in Postgres/MySQL/InnoDB):
+  - DB maintains a **wait-for graph**; if it finds a cycle, it picks a **victim** txn and
+    **rolls it back** (the cheaper/younger one) → the other proceeds; victim retries.
+  - So the app must be ready to **catch a "deadlock detected" error and retry** the txn.
+- **How to PREVENT it (design side):**
+  1. ⭐ **Consistent lock ordering** — always acquire rows in the same global order (e.g. lock
+     the lower account_id first). Both transfers grab Alice before Bob → no cycle. (Breaks circular wait.)
+  2. **Keep transactions short** — acquire all needed locks fast, commit quickly → smaller window.
+  3. **Lock everything up front** in one step instead of incrementally. (Breaks hold-and-wait.)
+  4. **Lock timeouts** — give up + retry instead of waiting forever.
+  5. **Optimistic locking** — avoid holding locks at all; check version at commit, retry on conflict.
+- ⚠️ Deadlock ≠ livelock (both keep retrying and still block) and ≠ simple lock contention
+  (one waits, then proceeds). Deadlock = *mutual, cyclic, permanent* wait.
+- Interview one-liner: "Deadlock = cyclic wait on locks; the DB detects the cycle and kills a victim,
+  so I make it rare with **consistent lock ordering** + short transactions, and make the app **retry**."
 
 ---
 

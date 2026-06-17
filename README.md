@@ -3,6 +3,10 @@ Author: **Raghav Gupta** | Mentor: Alex | Started: 2026-06-11 | Level at start: 
 
 > My own quick-recap notes, written by me, day by day. Each folder = one day, point-to-point only.
 
+> 📚 **Curriculum source-of-truth:** [`CURRICULUM-REFERENCE.md`](CURRICULUM-REFERENCE.md) — an 18-cluster
+> audit of what real 2025-26 interviews test, used to make every brief complete. Mentor rules live in
+> `.claude/skills/system-design-mentor/`.
+
 ---
 
 ## 📊 Progress Tracker
@@ -25,14 +29,33 @@ Author: **Raghav Gupta** | Mentor: Alex | Started: 2026-06-11 | Level at start: 
 | 14 | Rate Limiting (token/leaky bucket, sliding window) | 1 | ⬜ | — |
 | 15 | Back-of-Envelope Estimation | 1 | ⬜ | — |
 
-*(Days 16–60 added as we progress.)*
+### Phase 2 roadmap (set by the curriculum audit — Days 16–24 fill the biggest interview gaps)
+| Day | Topic | Why it was added |
+|-----|-------|------------------|
+| 16 | **Answer Framework** + functional vs non-functional requirements | The spine of every 45-min interview — nothing taught it before |
+| 17 | Distributed Primitives I — consensus, Raft, quorum, leader election, failure detection, gossip | Biggest senior-level gap |
+| 18 | Distributed Primitives II — distributed locks + fencing tokens, logical clocks, idempotency keys, exactly-once | Correctness toolkit |
+| 19 | Distributed Transactions — 2PC vs Saga, Outbox, CDC, dual-write | Microservices staple |
+| 20 | Fan-out (push/pull/hybrid), Event Sourcing & CQRS | Central newsfeed/notification decision (before Twitter design) |
+| 21 | Resilience — circuit breaker, bulkhead, retries+backoff+jitter, timeouts, graceful degradation | Cascading-failure prevention |
+| 22 | Observability — 3 pillars, Golden Signals/RED/USE, SLI/SLO/SLA, error budgets, OpenTelemetry | Asked in nearly every senior interview |
+| 23 | Security & Auth — authn/authz, OAuth2/OIDC, JWT, RBAC/ABAC, TLS/mTLS, password hashing, secrets, zero-trust | Glaring omission |
+| 24 | Deployment & Release — blue-green, canary, rolling, feature flags, monolith vs microservices | How systems ship safely |
+| 25–30 | Remaining design patterns + transition into real designs | — |
+
+*(Days 31–60 detailed as we progress; Phase 3 real-design bank is in `CURRICULUM-REFERENCE.md` §4.)*
+
+> ⚠️ **Phase 1 brief enrichments:** the audit found gaps to fold into Days 8–15 *before* I teach them
+> (e.g. Day 8 leaderless + quorum W+R>N; Day 9 consistent hashing + Snowflake IDs; Day 10 LSM internals +
+> geospatial; Day 11 delivery semantics + DLQ + Outbox; Day 14 distributed rate-limiting + Redis Lua).
+> Days 1–7 already taught get retro-notes only if a gap is interview-critical. Full list: `CURRICULUM-REFERENCE.md` §3.
 
 ---
 
 ## Phases
 - **Phase 1 (Days 1–15):** Foundations
-- **Phase 2 (Days 16–30):** Design Patterns & Trade-offs
-- **Phase 3 (Days 31–52):** Real System Designs
+- **Phase 2 (Days 16–30):** Design Patterns & Trade-offs (Days 16–24 set above)
+- **Phase 3 (Days 31–52):** Real System Designs (question bank in `CURRICULUM-REFERENCE.md` §4)
 - **Phase 4 (Days 53–60):** Interview Mastery
 
 ## Commands I can use
