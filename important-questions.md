@@ -18,3 +18,15 @@ Concrete example only L7 can do: route `/api/*` requests to the API server pool 
 The "Else" clause says: even with a perfectly healthy network (no partition), there is *still* a trade-off — to keep replicas **strongly consistent** you must wait for them to coordinate/agree on every read or write, which **adds latency**. So you can sacrifice some consistency to get lower latency, or pay latency to stay consistent.
 
 Examples: **DynamoDB / Cassandra are PA/EL** — they favor availability during a partition and **low latency** during normal operation (eventual consistency). **Google Spanner is PC/EC** — it favors **consistency** in both states, accepting higher latency (it waits on quorum + TrueTime). A single-leader SQL DB with synchronous replication is also EC.
+
+---
+
+**Q:** Explain the cache-aside (lazy-loading) pattern: what the application does on a read hit and a read miss, and what you must do on a write/update to avoid serving stale data (name the technique).
+
+**A:** **Cache-aside (lazy loading)** — the application sits "beside" the cache and manages it directly:
+- **Read hit:** app checks the cache → value present → return it. (Fast path, no DB touch.)
+- **Read miss:** cache empty → app reads the **database**, **writes the value into the cache** (typically with a **TTL** so it eventually expires), then returns it. The cache fills *lazily* — only requested keys get cached.
+- **Write/update:** the technique is **cache invalidation** — write to the DB, then **delete (invalidate) the cache key** for that item. The next read will miss and repopulate from the fresh DB value.
+
+Why *delete* rather than *update* the cached entry: deleting is simpler and avoids races where two concurrent writes leave a stale value cached. A short **TTL** is the backstop that bounds staleness even if an invalidation is missed.
+
