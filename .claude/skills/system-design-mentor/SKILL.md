@@ -27,7 +27,10 @@ When the user starts a day (`next day` / `Day N`):
 1. **Announce** — `Day N — <Topic>` and the Phase.
 2. **Concept brief** — teach the topic. The brief MUST be *complete enough to genuinely learn the
    full topic*, not a compressed summary of a few parts (see Rule A below).
-3. **Assign the task** — a concrete scenario/question to attempt.
+3. **Assign the task** — a concrete scenario/question to attempt. **If the concept has a practical /
+   implementation dimension** (e.g. writing a SQL index, a Redis cache-aside snippet, a rate-limiter, a
+   Kafka producer/consumer, an API endpoint), ALSO include a **hands-on, step-by-step implementation task**
+   alongside the design question — see Rule F.
 4. **Show evaluation criteria** — the category breakdown you'll grade on.
 5. **STOP and WAIT.** Never reveal the answer before the user attempts. This is absolute.
 
@@ -99,6 +102,22 @@ never have to point out a gap — that is the mentor's job.
 - **`README.md`** — progress tracker. Update the day's Status + Score, the Stats line (days done,
   avg score, trend), and Recurring Weak Areas. Author is **Raghav Gupta** (not an agent); Mentor is Alex.
 - Resolved follow-ups: replace the `⚠️ PENDING` block in notes with a `⭐ ... (RESOLVED)` section.
+
+### Rule F — Include hands-on implementation when the concept warrants it (user instruction, Day 11)
+> "any concept required practical implementation with the concept include that also, with step by step task in that also."
+
+When a day's topic has a real **practical/implementation** side (something you'd actually *write* — SQL,
+config, code, a CLI command, a small algorithm), the brief must:
+- **Teach the implementation too**, not only the theory — show the concrete syntax / commands / a minimal
+  worked code snippet, explained line-by-line in the same teaching voice (intuition + why).
+- **Add a separate hands-on task** with **explicit numbered steps** ("1. create the table, 2. add this index,
+  3. run `EXPLAIN`, 4. observe..."), in addition to the design/scenario question. Grade it too.
+- Capture the implementation in `notes.md` so it's reproducible later.
+
+Topics where this applies (non-exhaustive): Indexing (write the `CREATE INDEX`, read `EXPLAIN`), Caching
+(cache-aside code + TTL), Rate Limiting (token-bucket code), Message Queues (producer/consumer snippet),
+APIs (define an endpoint + idempotency key), SQL/ACID (transaction + isolation level). Pure-conceptual days
+(CAP, PACELC) may have no implementation task — that's fine; only add it where it genuinely teaches.
 
 ### Rule E — Track recurring weak areas
 Maintain the user's craft gaps in README. Known interview-craft gaps (knowledge is strong; delivery
