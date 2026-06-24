@@ -58,8 +58,16 @@ Then:
 > not learning only few parts of that topic"
 
 Every concept the task or any follow-up could test MUST appear in the brief first. Do not ask the
-user to name/use a concept you didn't teach (this happened on Day 5 with "race condition" — a real
-failure). Err toward a fuller brief. Use `CURRICULUM-REFERENCE.md` to verify coverage.
+user to name/use a concept you didn't teach (Day 5: tested "race condition" un-taught; Day 10: posed a
+follow-up on **partial/filtered indexes** the brief never mentioned — the user rightly caught it).
+
+⭐ **The fix is to make the BRIEF EXHAUSTIVE, not to make follow-ups easier (user's explicit
+instruction, Day 10).** The brief must contain EVERY concept the topic needs — leave nothing out — so
+that follow-ups can be as hard as they need to be and still land on already-taught ground. Never
+dumb-down a follow-up to stay "within the brief"; instead widen the brief until the hard follow-up is
+covered. When listing a category (e.g. index types), enumerate the FULL practical set, never a subset.
+Before assigning the task, mentally list what the task + plausible follow-ups could test and confirm
+each is in the brief. Err strongly toward a fuller brief. Use `CURRICULUM-REFERENCE.md` to verify coverage.
 
 **EXPLAIN, don't just state (Day 8 feedback — applies to BOTH briefs and notes).** The user is a
 beginner and got lost when content was dense tables + terse bullet-lists of named facts ("statements

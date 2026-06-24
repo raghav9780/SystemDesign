@@ -23,8 +23,8 @@ Author: **Raghav Gupta** | Mentor: Alex | Started: 2026-06-11 | Level at start: 
 | 8 | Replication (master-slave, multi-master, sync/async) | 1 | ✅ Done | 7/10 |
 | 9 | Sharding & Partitioning (hotspot problem) | 1 | ✅ Done | 7/10 |
 | 10 | Indexing (B-Tree, LSM, inverted, composite) | 1 | ✅ Done | 9.5/10 |
-| 11 | Message Queues & Event Streaming (Kafka, RabbitMQ, SQS) | 1 | ⬜ Next | — |
-| 12 | APIs (REST/GraphQL/gRPC, gateway, idempotency) | 1 | ⬜ | — |
+| 11 | Message Queues & Event Streaming (Kafka, RabbitMQ, SQS) | 1 | ✅ Done | 9.5/10 |
+| 12 | APIs (REST/GraphQL/gRPC, gateway, idempotency) | 1 | ⬜ Next | — |
 | 13 | Proxies & Reverse Proxies (Nginx, service mesh) | 1 | ⬜ | — |
 | 14 | Rate Limiting (token/leaky bucket, sliding window) | 1 | ⬜ | — |
 | 15 | Back-of-Envelope Estimation | 1 | ⬜ | — |
@@ -69,12 +69,16 @@ Author: **Raghav Gupta** | Mentor: Alex | Started: 2026-06-11 | Level at start: 
 ---
 
 ## 🔁 Recurring Weak Areas (auto-tracked)
-- Finish thoughts: diagnose → prescribe. *(improving — Day 2 prescriptions were solid)*
+- ⭐ **#1 GAP (3 days running: Day 9, 10, 11): NAME the precise mechanism, don't describe it.** Knowledge is
+  correct, but saying "some technique to allocate messages" instead of "**partition key**" loses the point.
+  Same half-point lost on access-skew (Day 9) and read-amplification (Day 10). Drill: when about to say "some
+  thing/technique," STOP and name it.
+- Finish thoughts: diagnose → prescribe. *(largely solved — recent answers structured well)*
 - Use precise vocabulary / proper names ("chunks" not "packets", "JWT" not "IndexedDB").
-- ⭐ SIGNATURE LESSON (3 days running): **state lives in a SHARED store, never on the server.**
+- ⭐ SIGNATURE LESSON: **state lives in a SHARED store, never on the server.**
 
 ## 📈 Stats
-- Days done: 10/60 | Avg score: **7.8/10** | Trend: 7 → 8 → 8(retry) → 8 → 7.5 → 8 → 7.5 → 7 → 7 → **9.5** 🔥
+- Days done: 11/60 | Avg score: **7.9/10** | Trend: 7 → 8 → 8(retry) → 8 → 7.5 → 8 → 7.5 → 7 → 7 → **9.5** → **9.5** 🔥
 - 🎯 Concept mastery solid; gap is INTERVIEW CRAFT + COMPLETENESS:
   (1) name the category not just the example, (2) structure answers / don't ramble,
   (3) justify by CONSEQUENCE, (4) answer EVERY part of a multi-part question,
