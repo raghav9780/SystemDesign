@@ -33,6 +33,13 @@ wording is where people trip:
   might be a little **stale** (out of date). "I always reply" — not "I always reply *correctly*."
 - **P — Partition tolerance:** the system **keeps working even when the network between nodes fails**. A
   "partition" is when nodes can't talk to each other — the cluster is split into islands that can't sync.
+  - ⚠️ **Two unrelated uses of the word "partition" — don't confuse them:**
+    - **Network partition (CAP sense, used here)** = a *failure event* — the link between nodes breaks.
+    - **Data partition = sharding** = a *design choice* — splitting the dataset into disjoint pieces, each
+      on a different node (users A–M on node 1, N–Z on node 2). Nothing to do with CAP.
+  - And don't confuse either of those with **replicas**: a replica is the *same* data copied to another
+    node (for redundancy); a shard is *different* data on another node (for scale). Real systems usually
+    do both — shard the data, then replicate each shard.
 
 ## The theorem (state it precisely)
 > **During a network partition (P), you must choose between C and A. You cannot have both DURING a partition.**
@@ -81,19 +88,30 @@ The right letter isn't a matter of taste; it follows from **how bad wrong data i
 ---
 
 ## PACELC — the upgrade that impresses
-CAP only talks about the partition case. **PACELC** extends it to cover *normal* operation too, which is
-where your system actually spends most of its life:
+CAP only talks about the partition case. **PACELC is *CAP + an extra clause*** — it covers BOTH the
+partition case AND normal operation (where the system actually spends most of its life).
 
 > **If Partition (P): choose A vs C. Else (E, normal operation): choose Latency (L) vs Consistency (C).**
 
-The insight: **even with NO partition, there's still a trade-off** — between **latency** (speed) and
-consistency. Here's why, concretely:
+⭐ **Read it as TWO clauses that BOTH always apply** — not as "PACELC kicks in only when there's no
+partition." The "P..." half restates CAP for the failure case; the "E..." half is the NEW contribution
+covering normal operation. A label like **PA/EL** is making two statements at once:
+- **PA:** when the network breaks → favor Availability over Consistency.
+- **EL:** when the network is fine → favor Latency over Consistency.
+
+Both halves describe the same system, just in two different situations it will spend its life in.
+
+### The "Else" clause — what trade-off it adds
+The insight CAP missed: **even with NO partition, there's still a trade-off** — between **latency** (speed)
+and consistency. Here's why, concretely:
 - **Strong consistency** means a write must **wait for multiple replicas to confirm** it before returning →
   the user waits longer → higher **latency**.
 - **Low latency** means you **return before all replicas confirm** → faster, but a read might catch a replica
   that hasn't received the write yet → **stale read**.
 
-So you're trading speed against correctness *all the time*, not just during failures.
+So you're trading speed against correctness *all the time*, not just during failures. That's why PACELC
+exists: CAP had nothing to say about the 99% of the time the network is healthy, even though the trade-off
+is still happening then.
 
 - ⭐ **ALWAYS answer BOTH halves of a PACELC class** — the "P..." part and the "E..." part. Dropping one half
   is a classic mistake (it cost me points in Q4).
@@ -115,8 +133,13 @@ Each of these is a trap an interviewer is hoping you'll fall into:
   distributed system.
 - ❌ **"CAP applies all the time."** No — it only describes behavior **during a partition.** (That's exactly
   the gap PACELC was invented to fill.)
+- ❌ **"PACELC only applies when there's no partition."** No — PACELC has TWO clauses that BOTH always
+  apply. The "P..." half covers the partition case (same as CAP); the "E..." half covers normal operation.
+  PACELC = CAP + Else clause, not a replacement that kicks in only when the network is fine.
 - ❌ **Confusing CAP-C with ACID-C.** CAP-C = "all replicas agree on the latest value now"; ACID-C =
   "transactions don't break data rules." Different things.
+- ❌ **Confusing "partition" (network failure, CAP sense) with "partition" (sharding, data-split sense).**
+  Same word, unrelated ideas. CAP only ever means the failure sense.
 
 ---
 
@@ -167,4 +190,5 @@ simply too expensive here, because its cost is availability — the one thing th
 - [ ] Answer EVERY part of a multi-part question (dropped "PA" half of PACELC in Q4).
 - [ ] Don't ask a clarifying question whose answer is already in the prompt (Q5) — answer it.
 - [ ] Watch wording precision ("can't have both DURING a partition", not "can have both").
+- [ ] PACELC = CAP **+** Else clause — both halves always apply (not just the "Else" half).
 - [x] CP/AP classification by consequence = 3/3, strong ✅. ATM double-spend risk spotted ✅.
