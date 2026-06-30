@@ -30,3 +30,13 @@ Examples: **DynamoDB / Cassandra are PA/EL** — they favor availability during 
 
 Why *delete* rather than *update* the cached entry: deleting is simpler and avoids races where two concurrent writes leave a stale value cached. A short **TTL** is the backstop that bounds staleness even if an invalidation is missed.
 
+---
+
+**Q:** Why does consistent hashing only require moving ~k/n keys when a node is added/removed, whereas `hash(key) % N` reshuffles almost every key when N changes? Explain the mechanism.
+
+**A:** With **`hash(key) % N`**, the divisor **N (the node count) is part of every key's calculation.** Change N from 4 to 5 and almost every key produces a different remainder → nearly the entire dataset must relocate. Each key's home depends on *how many nodes exist*.
+
+With **consistent hashing**, both nodes and keys are hashed onto a **ring**; a key belongs to the first node clockwise from it. A key's position on the ring is **fixed** — it depends only on `hash(key)`, never on the node count. Adding a node just drops a new point on the ring and takes over **only the arc between it and the previous node clockwise** → only the ~k/n keys in that one slice move; every other key stays put. (**Virtual nodes** — many points per physical node — keep the load even and spread a removed node's keys across many neighbors instead of dumping them all on one.)
+
+Essence: `%N` ties every key's home to the *node count*; consistent hashing ties it to a *fixed ring position*, so node changes stay local.
+
