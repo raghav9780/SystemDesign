@@ -121,14 +121,30 @@ sub-part). Syntax fixes to remember: `server <ip>:<port>;`, `listen` not `port`,
 
 ---
 
-## ⭐ Follow-up (PENDING)
+## ⭐ Follow-up (RESOLVED)
 **Q:** TLS terminates at Nginx, so Nginx→backend traffic is plain HTTP on the internal network. (1) Security
 risk, and when? (2) In **zero-trust** (don't trust the internal network), what two options protect that hop, and
 which Day 13 concept does it automatically for service-to-service traffic?
-*(Direction: (1) Yes if the internal network isn't trusted — anyone who taps it reads plaintext (creds, PII). On a
-truly isolated/trusted LAN it's often accepted for performance. (2) Either **re-encrypt the hop** (TLS from Nginx
-to backend — "TLS re-encryption," vs passthrough) or use **mTLS** (both sides present certs). The **service mesh /
-sidecar (§7, Envoy+Istio)** does mTLS for all east-west traffic automatically, no app changes.)*
+
+**(1) Yes — a risk whenever the internal network isn't trusted.** The hop is plaintext, so anyone who can tap the
+wire (a compromised host, a rogue service, a mirrored switch port) reads credentials, tokens, and PII in the clear.
+**Accepted** only on a genuinely isolated/trusted LAN or for low-sensitivity traffic, where the performance win of
+skipping re-encryption outweighs the risk. *(Answered correctly.)*
+
+**(2) Two options to protect the hop:**
+1. **TLS re-encryption** — Nginx terminates the client's TLS, then opens a *fresh* TLS connection to the backend
+   (`proxy_pass https://...`). Hop is encrypted again. Contrast **TLS passthrough** (Nginx never decrypts; backend
+   terminates).
+2. **mTLS (mutual TLS)** — *both* sides present certificates → not just encryption but mutual **authentication**.
+   A rogue service can't connect without a valid cert. This is the zero-trust gold standard.
+
+**The concept that does it automatically = service mesh + sidecar (§7).** The Envoy sidecar beside every service
+performs **mTLS** on all east-west calls transparently; the control plane (Istio/Linkerd) issues and rotates the
+certs — **no application code changes.** *(I named the service-mesh/sidecar answer correctly but skipped naming the
+two options — the recurring "answer every sub-part" gap.)*
+
+⭐ **One-liner:** "Protect the internal hop with TLS re-encryption or, better, mTLS for mutual auth — and a service
+mesh gives you mTLS everywhere for free."
 
 ---
 
