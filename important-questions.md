@@ -40,3 +40,15 @@ With **consistent hashing**, both nodes and keys are hashed onto a **ring**; a k
 
 Essence: `%N` ties every key's home to the *node count*; consistent hashing ties it to a *fixed ring position*, so node changes stay local.
 
+---
+
+**Q:** An order service must (a) write an order row to its SQL database and (b) publish an `OrderPlaced` event to Kafka. The naive code does `db.save(order)` then `kafka.publish(event)`. What is the name of the problem with this, what concretely goes wrong, and what standard pattern fixes it — describe how it works.
+
+**A:** This is the **dual-write problem**: the code writes to **two separate systems** (the DB and Kafka) that share no transaction, so they can't be made to succeed-or-fail atomically. Concrete failure: `db.save` commits, then the server crashes before `kafka.publish` runs → the order exists but the event is **lost forever**, so downstream services (email, inventory, analytics) never react. (The reverse also breaks: publish succeeds but the DB commit rolls back → downstream acts on an order that doesn't exist.)
+
+The fix is the **Outbox pattern**:
+1. In the **same atomic DB transaction** as the order row, insert a row into an **outbox table** describing the event. Because it's one transaction, the order and the outbox entry commit together or not at all — atomicity is restored.
+2. A separate **message relay** process (or **CDC** — Change Data Capture, e.g. Debezium tailing the DB's write-ahead log) reads unpublished outbox rows, publishes them to Kafka, and marks them done.
+3. If the relay crashes mid-publish it retries on restart → **at-least-once** delivery, so downstream **consumers must be idempotent** (dedup on event ID).
+
+Essence: convert an unsafe dual-write into a **single atomic DB write** (order + outbox row together), then let a relay/CDC reliably forward the event afterward.
