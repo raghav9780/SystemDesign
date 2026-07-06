@@ -52,3 +52,13 @@ The fix is the **Outbox pattern**:
 3. If the relay crashes mid-publish it retries on restart → **at-least-once** delivery, so downstream **consumers must be idempotent** (dedup on event ID).
 
 Essence: convert an unsafe dual-write into a **single atomic DB write** (order + outbox row together), then let a relay/CDC reliably forward the event afterward.
+
+---
+
+**Q:** A B-Tree index and an LSM-Tree index handle writes differently. Explain the core structural difference in how each handles a write, use it to explain why LSM-Trees are write-optimized while B-Trees are read-optimized, and name one real database that uses each.
+
+**A:** **B-Tree — writes update in place.** The tree is kept balanced and sorted on disk. A write must **find the correct leaf page and modify it where it lives**, often a **random disk I/O** (seek to that page, read-modify-write it), plus occasional page splits to keep the tree balanced. Because the data is always sorted and in one place, **reads are fast and predictable** — a point lookup or range scan is a short, direct traversal (O(log n)) to exactly one location. So B-Trees are **read-optimized**: you pay ordering cost on every write to make reads cheap.
+
+**LSM-Tree — writes append, never seek.** Writes go first to an in-memory **memtable** (and a sequential write-ahead log for durability). When the memtable fills, it's flushed to disk as an immutable, sorted **SSTable** — a **pure sequential write**, no random seeks. Sequential writes are far faster than random ones, so **writes are cheap → write-optimized.** The cost is paid on **reads**: a key may live in the memtable or any of several SSTables, so a read may check multiple files (mitigated by **Bloom filters** to skip files that can't contain the key, and by **compaction** that merges SSTables in the background). Compaction also causes **write amplification** (data is rewritten repeatedly as it merges).
+
+**The essence:** B-Tree does the ordering work **at write time** (random in-place updates) so reads are cheap; LSM-Tree defers the work, taking cheap **sequential appends** now and paying at read/compaction time. **Databases:** B-Tree → **PostgreSQL / MySQL (InnoDB)**; LSM-Tree → **Cassandra / RocksDB / LevelDB** (also HBase, ScyllaDB).
