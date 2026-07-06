@@ -26,8 +26,8 @@ Author: **Raghav Gupta** | Mentor: Alex | Started: 2026-06-11 | Level at start: 
 | 11 | Message Queues & Event Streaming (Kafka, RabbitMQ, SQS) | 1 | ✅ Done | 9.5/10 |
 | 12 | APIs (REST/GraphQL/gRPC, gateway, idempotency) | 1 | ✅ Done | 9/10 |
 | 13 | Proxies & Reverse Proxies (Nginx, service mesh) | 1 | ✅ Done | 9/10 |
-| 14 | Rate Limiting (token/leaky bucket, sliding window) | 1 | ⬜ Next | — |
-| 15 | Back-of-Envelope Estimation | 1 | ⬜ | — |
+| 14 | Rate Limiting (token/leaky bucket, sliding window, Redis+Lua) | 1 | ✅ Done | 8/10 |
+| 15 | Back-of-Envelope Estimation | 1 | ⬜ Next | — |
 
 ### Phase 2 roadmap (set by the curriculum audit — Days 16–24 fill the biggest interview gaps)
 | Day | Topic | Why it was added |
@@ -69,16 +69,18 @@ Author: **Raghav Gupta** | Mentor: Alex | Started: 2026-06-11 | Level at start: 
 ---
 
 ## 🔁 Recurring Weak Areas (auto-tracked)
-- **NAME the precise mechanism, don't describe it.** *(Day 9–12 gap — visibly improving Day 13: used "subset,"
-  "SSL/TLS termination," "L7" precisely. Keep landing exact terms: "cursor pagination," "idempotency key," "path-based routing.")*
-- ⭐ **#1 GAP NOW — answer EVERY sub-part / always give the "why".** Day 13 Req 4 asked to set the header AND say
-  why → set it, skipped the why. Same as Day 8 Q3, Day 9 Q5. When a question has 2+ clauses, answer all of them.
+- **NAME the precise mechanism, don't describe it.** *(Day 9–12 gap — now largely SOLVED: Day 13 "subset/SSL
+  termination/L7", Day 14 "token bucket / Lua script for atomicity / race condition" all landed cleanly.)*
+- ⭐ **#1 GAP NOW — answer EVERY "name it / why" sub-part.** Day 14 was the sharpest example: ALL 4 lost points
+  were unspoken clauses — the 8× consequence, the `Retry-After` purpose, why-lazy/why-atomic/why-expire. The
+  *code* was senior-level; the *score* fell only because the "why" went unsaid. Same as Day 13 Req 4, Day 8 Q3,
+  Day 9 Q5. **A "why?" or "name the specific X" is a scored box — tick every one.**
 - Finish thoughts: diagnose → prescribe. *(largely solved — recent answers structured well)*
 - Use precise vocabulary / proper names ("chunks" not "packets", "JWT" not "IndexedDB").
 - ⭐ SIGNATURE LESSON: **state lives in a SHARED store, never on the server.**
 
 ## 📈 Stats
-- Days done: 13/60 | Avg score: **8.1/10** | Trend: 7 → 8 → 8(retry) → 8 → 7.5 → 8 → 7.5 → 7 → 7 → **9.5** → **9.5** → **9** → **9** 🔥 (4 straight 9+)
+- Days done: 14/60 | Avg score: **8.1/10** | Trend: 7 → 8 → 8(retry) → 8 → 7.5 → 8 → 7.5 → 7 → 7 → **9.5** → **9.5** → **9** → **9** → 8 (Day 14: knowledge ~9.5, score capped by unspoken "why" sub-parts — a delivery gap, not a knowledge gap)
 - 🎯 Concept mastery solid; gap is INTERVIEW CRAFT + COMPLETENESS:
   (1) name the category not just the example, (2) structure answers / don't ramble,
   (3) justify by CONSEQUENCE, (4) answer EVERY part of a multi-part question,
