@@ -136,11 +136,25 @@ Before the next category of bugs, define the big idea they all live under.
 data; these are about concurrent *writes* clobbering each other.
 
 - **Lost update** — two transactions read the same value, both modify it, and one's write silently
-  overwrites the other's. The first write is "lost" as if it never happened. Example: two people edit the
-  same wiki page from a stale copy; whoever saves last wipes out the other's edit.
-- **Write skew** — two transactions read overlapping data, each writes based on a stale read, and
-  *together* they violate a constraint that *neither* would have violated alone. The overdraft race is the
-  textbook case: each transfer alone looked fine, but run concurrently they break the "balance ≥ 0" rule.
+  overwrites the other's. Both writes hit the **SAME row**, and the last writer clobbers the earlier
+  decrement/increment. The first write is "lost" as if it never happened. Examples: two people edit the
+  same wiki page from a stale copy and whoever saves last wipes out the other's edit; a counter that two
+  transactions both increment from 10 → 11 (the true answer should be 12); or Alice sending ₹500 to Bob
+  AND ₹500 to Carol at once, where both deductions come off the **same balance row** and one overwrites
+  the other's decrement.
+- **Write skew** — two transactions read an overlapping *set* of rows, then each writes a **DIFFERENT
+  row**, and *together* they violate a constraint that *neither* would have violated alone. The textbook
+  case is an **on-call rota / double-booking**: two doctors are both on call, a rule says "at least one
+  must stay on call," and each doctor's transaction reads "the other one is still on call, so I can go
+  off," then each updates *its own* row to off-call. Individually each looked fine; run concurrently they
+  leave zero doctors on call. (Same shape as double-booking a meeting room: two bookings each check "the
+  slot is free," each insert a *different* booking, and now the room is double-booked.) Write skew is
+  nastier than lost update because the writes touch different rows, so a plain per-row lock or version
+  check won't catch it — only **true Serializable isolation** reliably prevents it.
+
+⭐ **Crisp distinction:** counter increment / same-row double-deduct = **LOST UPDATE** (two writes to the
+SAME row, one clobbering the other). On-call rota / double-booking, where each txn writes a **different**
+row yet together they break a constraint = **WRITE SKEW** (needs true serializability to prevent).
 
 ⭐ Remember: lost update and write skew are **NOT** the same as dirty / non-repeatable / phantom reads.
 Those are READ phenomena; these are WRITE anomalies. Naming them correctly is itself an exam point.
@@ -173,8 +187,9 @@ overdrawn at −₹500. The constraint "balance ≥ 0" is violated even though e
 
 - ❌ This is **NOT** a "dirty read." A dirty read means reading *uncommitted* data — but here both
   transactions read the same fully **committed** ₹500. Calling it a dirty read is the classic mislabel.
-- ✅ The correct name is a **race condition / lost update / write skew** — both read the same committed
-  value, both act on it, and the constraint is violated.
+- ✅ The correct name is a **race condition → specifically a lost update**: both read the same committed
+  balance, both write back to the **same row**, and one deduction clobbers the other's. (This is *not*
+  write skew — write skew is when each txn writes a *different* row; see the on-call rota example above.)
 - **How to prevent it:**
   1. **Pessimistic lock** — `SELECT … FOR UPDATE` on Alice's row. The first transaction locks it; the
      second must wait, then re-reads the now-₹0 balance and correctly fails.
@@ -244,3 +259,80 @@ Committed** for ordinary reads (showing a profile, listing comments) where a tin
 - [ ] Include ALL of ACID — don't skip C (Consistency) in money examples.
 - [x] Mapping ACID letters → specific failures was strong ✅.
 - TODO: read DDIA Ch.7 (Transactions) for depth.
+
+---
+
+## ⭐ Interview-completeness additions (audit pass)
+
+**MVCC (Multi-Version Concurrency Control)** (HIGH). Here's how modern databases (Postgres, MySQL's
+InnoDB, Oracle) give you isolation *without* readers waiting on writers. Instead of locking a row so no one
+else can read it while it's being changed, the DB keeps **multiple versions** of each row, every version
+tagged with the transaction ID that created it. When your transaction reads, it sees a consistent
+**snapshot** of the data as of a point in time — old versions stay around for anyone still reading them.
+The magic line to remember: **"readers don't block writers, and writers don't block readers."** The knob
+is *when* the snapshot is taken — **Read Committed** grabs a fresh snapshot at the start of *each
+statement* (so you see others' commits between statements), while **Repeatable Read** takes *one* snapshot
+at the start of the transaction and reads from it the whole way through.
+
+**Snapshot Isolation + the "Serializable" naming trap.** Snapshot Isolation (SI) is what MVCC-based
+Repeatable Read gives you: it cleanly prevents dirty reads, non-repeatable reads, and phantom reads — but
+it **still allows write skew** (see the on-call rota above). This is a famous trap: Oracle and old
+Postgres versions *labeled* their SI level "Serializable" even though it wasn't truly serializable — it
+would happily let write skew through. Postgres 9.1+ fixed this with **Serializable Snapshot Isolation
+(SSI)**, which watches for dangerous **read-write dependency cycles** between transactions and aborts one
+of them when it detects a cycle that could break serializability. So "Serializable" means different things
+depending on the engine and version — know which one you're actually getting.
+
+**Per-engine default isolation levels** (a rapid-fire question that trips people up). **Postgres, Oracle,
+and SQL Server** all default to **Read Committed**. **MySQL / InnoDB** defaults to **Repeatable Read**.
+The lesson: *never assume* the default — on any money or inventory path, set the isolation level
+**explicitly** in your transaction so you're not silently relying on whatever the engine happened to pick.
+
+**SQL vs NoSQL — when to choose which.** Reach for **SQL** when you have structured data with real
+relationships, need ACID guarantees, do multi-row transactions, or run ad-hoc queries you can't predict up
+front — money, orders, inventory. Reach for **NoSQL** when you need massive write throughput, a
+flexible/evolving schema, or you have a small set of known, simple access patterns and can tolerate
+eventual consistency. ⭐ Senior nuance: a single well-tuned Postgres box comfortably handles *millions of
+rows and thousands of QPS*, so "we'll outgrow SQL" is rarely the actual reason to switch — don't reach for
+NoSQL on scale fears you don't yet have.
+
+**Connection pooling.** Opening a fresh DB connection is *expensive* — it's a TCP handshake plus
+authentication plus (in Postgres) spinning up a whole backend process — and databases cap how many
+connections they'll allow. So apps keep a **pool** of already-open connections that requests **borrow and
+return** instead of opening one each time. Postgres connections are especially heavyweight (one OS process
+*per connection*), so high-concurrency setups put an **external pooler like PgBouncer** in front to
+multiplex many client connections onto a small set of real database connections.
+
+**2PL (Two-Phase Locking) vs 2PC (Two-Phase Commit)** — a classic confusion trap because both say
+"two-phase," but they solve *unrelated* problems. **2PL** is a technique for achieving serializability on a
+**single node**: a *growing* phase where a transaction acquires locks, then a *shrinking* phase where it
+releases them (and acquires no new ones). **2PC** is an atomic-commit protocol *across* **multiple
+nodes/databases**: a coordinator runs a *prepare* phase (everyone votes "ready?") then a *commit* phase
+(everyone finalizes together). One is about locking within a DB; the other is about committing atomically
+across DBs.
+
+**Normalization vs denormalization + joins.** **Normalization** means each fact lives in exactly one
+place; tables reference each other by keys, and you reassemble the full picture at query time with a
+**JOIN** (which matches rows across tables by their key). **Denormalization** is deliberately *duplicating*
+data so you can avoid joins and read faster — the cost being you now have to keep all those copies in sync
+on every write. This matters at scale because a **cross-shard join** forces a **scatter-gather** across
+many machines, which is slow — a very common reason teams denormalize or move that data into NoSQL.
+
+**Cross-shard / distributed transactions.** Single-node ACID is *cheap* because one engine owns all the
+locks and can commit atomically by itself. The moment a transaction spans **multiple shards or
+microservice databases**, you need either **2PC** (atomic, but *blocking* — it holds locks across the
+network and stalls everything if the coordinator dies mid-commit) or a **Saga** (a sequence of *local*
+transactions, each with a **compensating** undo action to roll back the earlier steps if a later one
+fails; atomicity is only eventual, not instantaneous). ⭐ The design lesson: **co-locate related data** so
+you rarely need a distributed transaction in the first place.
+
+**Shared vs exclusive locks.** A **shared (read) lock** lets *many* readers hold it at once but blocks any
+writer — everyone can look, no one can change. An **exclusive (write) lock** can be held by only *one*
+transaction and blocks everyone else, readers and writers alike. `SELECT … FOR UPDATE` takes an
+**exclusive** lock on the rows it reads (so you can safely read-then-write), whereas a plain `SELECT` under
+MVCC takes **no lock at all** (it just reads its snapshot).
+
+**Stored procedures** (brief). A stored procedure is business logic **stored and executed inside the
+database** itself. The upside is fewer network round-trips (the logic runs right next to the data); the
+downsides are that it's harder to version-control, test, and scale, and it tends to lock you to one
+vendor's SQL dialect. The modern default is to keep logic in the **application tier**, not the DB.

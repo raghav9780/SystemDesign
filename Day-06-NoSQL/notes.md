@@ -227,6 +227,68 @@ options, and the trade is exactly the read-vs-write tension from denormalization
 
 ---
 
+## ⭐ Interview-completeness additions (audit pass, before Phase 2)
+
+### The 5th & 6th families: Time-Series and Vector DBs
+- **5. Time-Series (TSDB) 📈** — specialized for data stamped with a time and queried by time ranges (metrics,
+  IoT, monitoring, financial ticks). Optimized for append-heavy writes + time-window queries ("avg CPU/min over
+  6h"), with automatic **downsampling** and **retention** (drop raw after 30d, keep rollups). Examples: **InfluxDB,
+  TimescaleDB, Prometheus**. (Wide-column stores are also used for time-series, but a purpose-built TSDB gives
+  bucketing + retention for free.)
+- **Vector DBs 🧠 (a top 2025-26 topic)** — store high-dimensional **embeddings** (numeric arrays capturing the
+  *meaning* of text/images) and find the nearest by similarity, not exact match → **Approximate Nearest Neighbor
+  (ANN)** search. They're the storage behind **semantic search and RAG** (embed the question → fetch most-similar
+  chunks → feed an LLM). Examples: **Pinecone, Weaviate, Milvus, pgvector**. Expect this in any AI/search design.
+
+### ⭐ Query-first modeling (the headline NoSQL skill)
+The inverse of SQL. SQL: model data cleanly (normalize), figure out queries later. NoSQL: **list every access
+pattern up front** ("get user by id", "get a user's last 20 orders newest-first"), then design keys/tables so each
+query is a **single lookup**. You design the storage layout *backwards from the queries*. If a query wasn't planned
+for, the data isn't laid out to answer it — which is why Cassandra/DynamoDB modeling starts with a query list, not
+an ER diagram.
+
+### ⭐ Partition key & the hot-partition problem (near-guaranteed question)
+NoSQL spreads data across nodes by hashing a **partition key**, so the key choice decides whether load spreads
+evenly. A good key has **high cardinality + even access** (e.g. `user_id`). Bad keys create a **hot partition**:
+pick `country` and India/US swamp one node; pick a monotonic timestamp and all writes hit one node. Fixes: a
+higher-cardinality key, or a **composite key** — DynamoDB **partition key + sort key**, Cassandra **partition key +
+clustering columns** — so related items co-locate and sort while load still spreads. (Ties to Day 9 sharding.)
+
+### ⭐ Tunable consistency (bridges to CAP, Day 7)
+Consistency often isn't fixed — it's a **per-request dial**. Cassandra lets you set a consistency level (ONE /
+QUORUM / ALL): QUORUM = a majority of replicas must respond (strong-ish, higher latency); ONE = fast but may read
+stale. DynamoDB: "eventually consistent reads" (cheap, default) vs "strongly consistent reads" (a flag, costs
+more). Lesson: you often choose **consistency vs latency at query time**, not once for the whole DB.
+
+### Secondary indexes in NoSQL (GSI vs LSI; Cassandra's trap)
+Query by non-key fields via **secondary indexes**, but with limits. DynamoDB: a **Global Secondary Index (GSI)** —
+different partition key, queryable across all partitions, eventually consistent — and a **Local Secondary Index
+(LSI)** — same partition key, different sort key, defined at table creation. Cassandra's built-in secondary indexes
+are a trap: they scatter-gather across every node and do badly on high-cardinality columns, so teams build a
+**second table** (a manual inverted index) instead. When a query isn't served by your keys, the answer is "GSI, a
+second table, or a **materialized view**."
+
+### Materialized views / CQRS read models
+When one layout can't serve every query, keep **materialized views** — precomputed, denormalized read-copies shaped
+for a specific query, updated as writes arrive (Cassandra supports these natively). Generalizes to **CQRS** (Command
+Query Responsibility Segregation): separate the write model from read model(s), each optimized for how it's read,
+kept in sync asynchronously — the same eventual-consistency trade you already accepted with denormalization.
+
+### Two SQL-vs-NoSQL myths to bust
+1. **"NoSQL = scale, SQL can't scale"** — a well-tuned Postgres/MySQL handles millions of rows and thousands of
+   writes/sec. "We'll get big" is *not* a reason to abandon SQL; decide on **data shape, access patterns, and
+   consistency needs**, not fear of scale.
+2. **The split isn't binary** — **NewSQL / distributed SQL** (Google Spanner, CockroachDB, Vitess, Citus) gives
+   horizontal sharding *and* ACID transactions, so you scale out without giving up strong consistency.
+
+### Why wide-column is "great for writes" (the mechanism — full detail Day 10)
+It's the **LSM-tree**: writes go to an in-memory memtable + an append-only log (fast **sequential** writes, no
+random seeks), then flush to immutable sorted files (SSTables) merged in the background (compaction). Reads may
+check several files → **Bloom filters** skip files that can't hold a key. That's the engine behind "massive write
+throughput."
+
+---
+
 ## Personal Notes (recurring gaps)
 - [ ] Name the TYPE category, not just the example.
 - [ ] Structure interview answers (Q6 was one run-on sentence — break into crisp points).

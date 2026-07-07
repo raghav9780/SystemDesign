@@ -174,6 +174,40 @@ idempotency guarantee live to be bulletproof?
 
 ---
 
+## ⭐ Interview-completeness additions (audit pass)
+
+### A. (CRITICAL) Client-push transports: short polling vs long polling vs SSE vs WebSockets
+Plain request/response has one hard limit: **the client always initiates.** The SERVER can't push. §9's webhook solves server→*server*; this solves server→*browser/app*. Four options, cheapest → richest:
+- **Short polling** — client asks every N seconds ("new data?"). Dead simple, works everywhere, but **wasteful** (mostly empty responses) and **laggy** (latency ≈ the poll interval).
+- **Long polling** — client sends a request; the server **HOLDS it open** until data arrives (or a timeout), then responds; client **immediately re-requests.** Near-real-time over plain HTTP, no special protocol. Cost: **ties up a connection per client**, and reconnect storms are bursty.
+- **SSE (Server-Sent Events)** — ONE long-lived HTTP connection; server **streams events** (`Content-Type: text/event-stream`); **auto-reconnect is built in.** But **one-directional (server→client only)** and **text only.** Great for feeds, notifications, live scores, progress bars.
+- **WebSockets** — a single TCP connection **upgraded** (`Upgrade: websocket`) to **FULL-DUPLEX**; both sides push anytime. Best for **chat, multiplayer games, collaborative editing, trading**. Cost: **stateful, long-lived connections** → harder to load-balance (needs **sticky routing** or a **shared pub/sub backplane** like Redis so any server can reach any client).
+- ⭐ **Decision:** server→client only + HTTP-friendly → **SSE**; true two-way low-latency → **WebSockets**; can't change infra / firewall-hostile environment → **long polling**.
+
+### B. Webhook reliability engineering (§9 only *defines* push-vs-pull — this is the hard part)
+- **Delivery is at-least-once** → the receiver **MUST be idempotent** (dedupe on the event ID — same idea as §3, applied to inbound events).
+- **Retries:** exponential backoff **+ jitter**, a **capped** number of attempts, then drop to a **DLQ / failed-deliveries dashboard** for manual replay.
+- **Security — sign the payload:** server computes an **HMAC** of the body with a **shared secret** and puts it in a header (e.g. `Stripe-Signature`); the receiver **recomputes and compares.** Include a **timestamp** in the signed data and **reject old signatures** → stops replay attacks.
+- **Ordering is NOT guaranteed** → tolerate out-of-order delivery using **event timestamps / version numbers**, not arrival order.
+
+### C. HATEOAS + the Richardson Maturity Model (name it, even if rarely built)
+- **HATEOAS** = *Hypermedia As The Engine Of Application State*: responses include **links to the next possible actions**, so the client **discovers transitions** instead of hardcoding URLs. E.g. an order returns `"_links": { "pay": "/orders/42/pay", "cancel": "/orders/42/cancel" }`.
+- This is **Richardson Level 3** — the maturity ladder: **L0** single endpoint/RPC-over-HTTP · **L1** resources · **L2** verbs + resources + status codes · **L3** hypermedia (HATEOAS).
+- ⭐ **Reality check worth saying out loud:** almost nobody implements L3 fully — **most "REST" APIs are really Level 2** (proper nouns + verbs + status codes). Naming the model signals you know where the line actually is.
+
+### D. Input validation & contract hygiene (validate at the edge)
+- **Validate at the edge** (gateway/handler) before any business logic: **schema-validate the body** (OpenAPI / JSON Schema for REST, protobuf for gRPC), **reject unknown or oversized payloads**, and return **`400`** with a **structured error listing the failed fields** (not a bare string).
+- **Naming/shape best practices:** **plural nouns** (`/users` not `/user`), **consistent casing**, **filter/sort via query params** (`?status=active&sort=-created`), **always paginate collections**, and on create return the **created resource + a `Location` header** with `201`.
+- **Never break a published contract** — **version instead** (§8). A silent breaking change is the cardinal API sin.
+
+### E. Small fixes to earlier sections
+- **`204 No Content`** — add to §2's status-code list: the canonical response for a successful **`DELETE`** (and empty-body **`PUT`**) where there's nothing to return.
+- **`PATCH` is NOT inherently idempotent** — correction to §2's safe/idempotent list: unlike `PUT`/`DELETE`/`GET`, whether `PATCH` is idempotent **depends on the patch** (e.g. "set field=x" is idempotent; "increment by 1" is not).
+- **Gateways can do PROTOCOL TRANSLATION** — add to §7: expose **public REST** at the door while calling **internal gRPC** services behind it (also fronts the gRPC-Web problem from §5).
+- **GraphQL authz is FIELD-LEVEL** — add to §4's 👎: because one query can touch many fields/resolvers, you must authorize **per field**, which is harder than REST's simple **per-route** checks.
+
+---
+
 ## Personal Notes (recurring gaps)
 - [ ] ⭐ **#1 GAP, 4 days running — NAME the concept, don't describe/contradict it.** My *implementation* of
   idempotency was 4/4 (near-perfect), yet I lost design points by not saying "idempotency key" and by saying "or

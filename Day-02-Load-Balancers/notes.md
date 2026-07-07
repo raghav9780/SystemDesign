@@ -56,6 +56,11 @@ Because it understands the request, it can do clever things:
   ends *at the LB*.)
 - **Caching** — keep a copy of common responses so it can answer without bothering a server.
 - **Compression** — shrink responses before sending them out.
+  - ⚠️ **Careful — these last two are NOT features of a *pure* load balancer.** A cloud LB like **AWS
+    ALB** does **not** cache or compress; it only routes. Caching and compression are **reverse-proxy /
+    CDN** features. You get them only when your L7 LB *is also* a reverse proxy — e.g. **Nginx** or
+    **HAProxy** — which wear both hats. So the honest framing: "L7 LBs that double as a reverse proxy
+    (Nginx) can cache/compress; a bare cloud LB (ALB) cannot."
 
 Trade-off:
 - ✅ **Smart** — content-aware routing and the features above.
@@ -83,6 +88,10 @@ different situations.
 - **IP Hash** — take the user's IP address, run it through a hash function (a math function that turns
   the IP into a number), and use that to **always pick the same server for that user**. This is one way
   to "stick" a user to a server — which leads directly into the next topic.
+  - ⚠️ **The trap with plain `hash(IP) % N`:** the `% N` is tied to the server *count*. The moment you add
+    or remove a server, `N` changes, and **almost every user gets remapped to a different server** — so
+    nearly everyone loses their sticky server (and their session with it) on any scale event. This exact
+    pain is what **consistent hashing** (see the audit section below) was invented to fix.
 
 ---
 
@@ -153,6 +162,70 @@ killed (deploy, crash, scale-down)? Starting a 2GB upload over from zero is mise
   **bypassing the web servers for the heavy data transfer**. The servers' only jobs are to **give
   permission** (issue the URL) and **record metadata** (note that the file exists). The gigabytes never
   flow through your app servers at all.
+
+---
+
+## ⭐ Interview-completeness additions (audit pass)
+
+These are the pieces an interviewer expects you to reach for once the basics above are solid. Same idea
+each time: name the mechanism, know why it exists.
+
+**1. LB high-availability: VIP + VRRP + keepalived (HIGHEST — "who balances the balancer?")**
+We said "run multiple LBs with failover" — but *how* does a client's traffic actually jump to the standby
+LB? The trick: clients never target a physical LB's IP. They target a **floating / virtual IP (VIP)** —
+an address that isn't nailed to one machine. **VRRP** (Virtual Router Redundancy Protocol), run by a
+daemon called **keepalived**, lets a standby LB **claim the VIP the instant the active LB dies**. It
+announces the takeover with a **gratuitous ARP** (a broadcast that says "the VIP now lives at my MAC
+address"), so the network reroutes packets to the standby within seconds. That gratuitous-ARP hand-off
+*is* the mechanism behind **active-passive failover** — memorize the phrase "VIP + VRRP + keepalived."
+
+**2. Connection draining / deregistration delay (zero-downtime deploys)**
+When you remove a server — a deploy, a scale-down — you can't just kill it, or every request it's mid-way
+through serving dies with it. **Connection draining** (AWS calls it **deregistration delay**) means: the
+LB **stops sending new requests** to that server immediately, but **lets the in-flight ones finish** (up
+to a timeout, e.g. 30–300s) before the server is actually shut down. Without this, every single deploy
+drops live connections and users see errors. With it, deploys are invisible.
+
+**3. Consistent hashing (in the LB context)**
+The fix for the `hash(IP) % N` trap above. Instead of `% N`, you place **both the servers and the keys
+(users) on a ring** (imagine a clock face of hash values); a key is served by the **next server clockwise**
+on the ring. Now adding or removing a server only re-homes the keys **between it and its neighbor** —
+roughly **1/N of keys move, not everyone**. **Virtual nodes** (each physical server placed at many points
+on the ring) smooth out the distribution so no one server gets a fat arc. Interviewers ask for this **by
+name** — it's the standard answer for "how do you keep affinity stable as the fleet scales?"
+
+**4. Cloud product mapping + hardware vs software**
+Know the concrete names, because interviewers switch to them fast:
+- **Software LBs:** **Nginx**, **HAProxy**, **Envoy** — run on commodity servers, flexible, cheap.
+- **Hardware LB:** **F5 Big-IP** — a dedicated physical appliance, very fast, very expensive, legacy/enterprise.
+- **Cloud:** **AWS ALB = Application (L7)** — path / host / header routing. **AWS NLB = Network (L4)** —
+  ultra-fast, routes on IP/port only. **Memorize: "ALB = L7, NLB = L4."**
+
+**5. Health-check specifics**
+"The LB pings each server" has more depth. **Active** health checks = the LB **probes** an endpoint (e.g.
+`GET /health`) on a fixed **interval**. **Passive** health checks = the LB **watches real traffic** and
+marks a server bad after **N consecutive errors**. To stop a flaky server from flip-flopping in and out
+(**flapping**), you set **healthy / unhealthy thresholds** — e.g. "3 good checks to re-add, 2 bad to
+remove." And distinguish **liveness** (is the process even up?) from **readiness** (is it *warmed up* —
+DB connected, caches primed — and ready to take traffic?). A server can be live but not ready.
+
+**6. GSLB / DNS-based global load balancing**
+Everything above balances within one region. To route users **across regions** (e.g. Europe → the EU
+data center, US → the US one), you use **GSLB (Global Server Load Balancing)**, usually done at the **DNS**
+layer: the DNS server **returns different IPs** depending on the user's **geo, latency, or health**
+(**AWS Route 53** routing policies do exactly this). ⚠️ **Limitation:** DNS answers are **cached for the
+TTL** (time-to-live), so when a region dies, clients keep hitting the dead IP until their cache expires —
+**failover is slow**. That's precisely why **Anycast** (one IP announced from many locations, the network
+picks the nearest live one) is preferred when you need *fast* global failover.
+
+**7. (polish) Two-tier L4→L7 and Power-of-Two-Choices**
+- **Two-tier L4 → L7:** at massive scale you don't have *one* smart L7 LB — you put a **fast, dumb L4 LB
+  in front** that just spreads connections across a **fleet of L7 LBs** behind it. The L4 tier handles raw
+  volume; the L7 tier handles the smart routing. Best of both.
+- **Power-of-Two-Choices:** true least-connections needs the LB to track live load on *every* server —
+  expensive at scale. The cheap trick: **pick 2 servers at random, send to the less-loaded of the two.**
+  Surprisingly, this lands **nearly as well as full least-connections** for a tiny fraction of the
+  bookkeeping. A great answer to "how do you balance load cheaply across thousands of servers?"
 
 ---
 

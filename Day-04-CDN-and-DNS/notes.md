@@ -179,6 +179,72 @@ This is the classic interview opener, and it ties the whole day (plus earlier da
 
 ---
 
+## ⭐ Interview-completeness additions (audit pass)
+
+**1. Recursive vs iterative resolution (name the mechanism).** When you type a name, you make exactly *one*
+query — to your **recursive resolver** (your ISP's, or a public one like `8.8.8.8`). It promises to come back
+with a *final* answer and does all the legwork on your behalf. How does it get that answer? By making a series
+of **iterative** queries: it asks a **root** server ("who handles `.com`?"), then the **TLD** server ("who's
+authoritative for `google.com`?"), then the **authoritative nameserver** ("what's the actual IP?"). So name the
+two halves in an interview: **client ↔ resolver is recursive** ("you go find it for me"), **resolver ↔
+root/TLD/authoritative is iterative** ("here's the next server to ask"). Same chain from section A, now with the
+mechanism labelled.
+
+**2. Negative caching (NXDOMAIN).** Resolvers don't only cache *successes* — they cache **failures** too. When a
+name genuinely doesn't exist, the authoritative server returns **NXDOMAIN** ("no such domain"), and the resolver
+caches that *negative* answer (its lifetime comes from the **minimum TTL field in the domain's SOA record**). So
+if a bot or a fat-fingered typo hammers a nonexistent name, the resolver answers "nope" straight from cache
+instead of walking the whole root → TLD → authoritative chain every time. This is the DNS analogue of the
+**cache-penetration** problem from Day 3 (caching the "not found" so misses don't stampede the source).
+
+**3. HTTP Cache-Control headers (the Day 3 ↔ Day 4 bridge).** How does a browser or CDN actually *know* how long
+to keep a cached file? The origin tells them via the **`Cache-Control`** response header — this is the missing
+link between "caching" (Day 3) and "CDN/edge caching" (Day 4). Key directives: **`max-age`** = how long the
+*browser* may cache; **`s-maxage`** = how long a *shared* cache (the CDN) may cache — it overrides `max-age` at
+the edge; **`public`** = any cache may store it, **`private`** = only the browser may (never a shared CDN — think
+user-specific data); **`no-cache`** = you may store it but must **revalidate** before reuse; **`no-store`** =
+never write it down at all. Revalidation is made cheap by **`ETag`** (a content fingerprint the origin sends):
+the client sends it back as **`If-None-Match`**, and if unchanged the origin replies **`304 Not Modified`** with
+an empty body — you skip re-downloading the whole file. And **`stale-while-revalidate`** lets the edge serve the
+*stale* copy instantly while it refreshes in the background — no user waits on the fetch.
+
+**4. GeoDNS / routing policies + GSLB.** Section A treated DNS as returning *the* IP — but an authoritative server
+can return **different IPs to different resolvers on purpose**. Common policies: **geo-based** (European resolvers
+get the Frankfurt IP, US resolvers get Virginia), **latency-based** (return whichever data center is fastest for
+that resolver), **weighted** (send 5% of answers to a new version — a **canary** split), plus **health-checked
+failover** (stop handing out an IP once its endpoint fails a health check). Together this is **DNS-based Global
+Server Load Balancing (GSLB)** — load balancing at the *name-resolution* layer, across regions. The caveat ties
+straight back to **TTL**: answers are cached for the TTL, so GeoDNS is **coarse** and can **misroute** a user
+whose resolver is far from them or holding a stale answer. That imprecision is exactly *why* CDNs lean on
+**Anycast** (section B) for fine-grained, per-request routing instead.
+
+**5. Origin shield / multi-tier caching + hit ratio.** A pull CDN (section C) has a hidden failure mode: when a
+file is *cold*, **every edge PoP** that gets a first request fetches it from your origin independently — so a
+brand-new object can trigger **N origin fetches**, one per PoP, all at once. The fix is an **origin shield**: a
+designated **mid-tier cache** that all edges consult *before* going to the origin. Now a cold object causes just
+**one** origin fetch (the shield's), and every edge fills itself *from the shield*. This **protects the origin**
+from stampedes and **raises the overall cache hit ratio**, since the shield aggregates misses that would
+otherwise each hit origin.
+
+**6. CDN security — signed URLs / signed cookies.** How do you serve **private or paywalled** content (a paid
+video, a customer's invoice) through a *public* CDN edge that anyone can reach? **Signed URLs**: the origin
+issues a URL carrying a **time-limited, cryptographically signed token**; the edge **validates the signature and
+expiry** before serving, so the link can't be **shared or replayed** once it expires. (**Signed cookies** do the
+same for a whole set of files rather than one URL.) CDNs also **terminate TLS at the edge** (the HTTPS handshake
+from section E happens at the nearby PoP, not your distant origin) and sit in front as a security layer providing
+**WAF, DDoS mitigation, and bot protection**.
+
+**7. Active purge / tag (surrogate-key) invalidation.** Section C gave two invalidation options — wait out the
+**TTL** or use **versioned URLs**. There's a third: **active purge**, where you *tell* the CDN to drop cached
+copies *now*. You can purge a **single URL**, or — more powerfully — attach **tags (surrogate keys)** to objects
+(e.g. tag every page and asset for `product-123`) and then **invalidate every edge copy carrying that tag in one
+API call**. Trade-off vs versioned URLs: **versioned URLs** update **instantly with no purge needed** (the old
+URL is just abandoned) but force you to **change every reference** to the file; **tag purge** needs an explicit
+call and brief propagation but requires **no URL changes** — great for content you can't easily re-reference
+everywhere.
+
+---
+
 ## Personal Notes (recurring gaps)
 - [ ] Prescribe the SPECIFIC ACTION (Q3: "lower the TTL in advance", not just "TTL caches it").
 - [ ] FINISH THE FULL LOOP (Q4: include LB→cache→DB→render, not just up to HTTP request).

@@ -114,6 +114,44 @@ Sharding prematurely = classic over-engineering.
 
 ---
 
+## ⭐ Interview-completeness additions (audit pass)
+
+### 1. Secondary indexes under sharding — local vs global (the biggest gap)
+Classic curveball: *"you shard tweets by `user_id`, now support search by `#hashtag`."* Your shard key is `user_id`, but the query is on a **different** attribute. Two ways to build the index:
+
+- **Local (document-partitioned) index** — each shard indexes **only its own rows**. A query on the non-shard attribute doesn't know which shard holds matches, so it must **scatter-gather**: hit every shard, merge results. ➜ **cheap writes** (index update is local, same shard as the row), **expensive reads** (fan-out to all N shards). This is **DynamoDB LSI**.
+- **Global (term-partitioned) index** — the index itself is sharded **by the indexed term** (e.g. hash of the hashtag). A read for one term lands on **one shard**. But a write must now update an index partition living on a **different** shard from the row it describes. ➜ **fast reads** (single-shard lookup), **slow, distributed, eventually-consistent writes**. This is **DynamoDB GSI**.
+- ⭐ **The trade in one line:** local = fast writes / slow reads; global = fast reads / slow writes.
+
+### 2. Rebalancing strategy — fixed partition count vs dynamic split/merge
+How do you move data when you add a node — *without* re-keying everything?
+
+- **Fixed partition count** — create **many more partitions than nodes** up front (e.g. 1000 partitions across 10 nodes). Adding a node just **steals whole partitions** off busy nodes — no keys get re-hashed, only partition ownership moves. (Elasticsearch, Cassandra-style.) Downside: **you must guess the count early**; too few caps your scale, too many adds overhead.
+- **Dynamic split/merge** — partitions **split** when they grow past a size threshold and **merge** when they shrink. Count adapts to the data automatically. (HBase regions, MongoDB chunks.)
+- ⭐ **Rule either way:** **never `% node_count`** — that re-keys the world on every topology change. Pin the key→partition mapping so adding a node moves **minimal** data (this is exactly why consistent hashing / fixed partitions exist).
+
+### 3. Fan-out — write vs read (the bridge to feed/timeline designs)
+When a post must appear in many followers' feeds, *where* do you do the work?
+
+- **Fan-out on write (push)** — on post, **copy the post into every follower's precomputed feed**. ➜ reads are trivial (feed already assembled), but a **celebrity with 100M followers = 100M writes** per post — the **fan-out problem** (and it pairs directly with the celebrity **hot-key / access-skew** issue from earlier).
+- **Fan-out on read (pull)** — store the post **once**; **assemble each feed at read time** by pulling from everyone you follow. ➜ cheap writes, but **expensive reads** on every feed load.
+- ⭐ **Real systems go hybrid:** **push for normal users**, **pull for celebrities**, **merged at read time** — best of both.
+
+### 4. Routing / config service — how a request finds its shard (make it explicit)
+Something must map **key → shard** on every request. Three shapes:
+
+- **Routing tier / coordinator** — client asks a **config service** which shard owns the key (e.g. **MongoDB `mongos` + config servers**).
+- **Client-side routing** — the **client holds the ring/mapping** itself and routes directly (**Cassandra**).
+- **Proxy** — a middle layer routes on the client's behalf (**Vitess**).
+- ⭐ The **routing table is itself state** — it must be **consistent + highly available**, so it's usually kept in **ZooKeeper / etcd**. (If the router lies about ownership, reads/writes go to the wrong shard.)
+
+### 5. (brief) Vertical partitioning vs normalization — don't conflate them
+- **Vertical partitioning** splits the **COLUMNS** of one table across different stores for **size/access reasons** (e.g. hot small columns on fast storage, big blob column elsewhere).
+- **Normalization** splits by **entity/relationship** to **remove redundancy**.
+- ⭐ Same "split a table" verb, totally different motive — vertical partitioning is about physical size/access; normalization is about data-model correctness.
+
+---
+
 ## Personal Notes (recurring gaps)
 - [ ] **Don't claim a property you didn't check:** range-by-name is NOT evenly distributed — the brief warned exactly this. Test the key against all 3 properties honestly.
 - [ ] **Naming precision:** it's **access skew / celebrity problem**, not just "hotspot"; the scheme is called **Snowflake**.

@@ -40,8 +40,12 @@ You add more servers and spread the work across all of them.
 
 - ✅ **Near-infinite scaling** — out of capacity? Add another node. And another. There's no single
   ceiling the way there is with one big box.
-- ✅ **Fault tolerant** — because no single machine is doing everything, one node dying just means the
-  others pick up its share. The system survives.
+- ✅ **Enables fault tolerance** — because no single machine is doing everything, one node dying can
+  mean the others pick up its share and the system survives. But note: horizontal scaling *enables*
+  fault tolerance, it doesn't *guarantee* it. You still need redundancy (real spare copies), health
+  checks (to detect the dead node), and spare capacity (headroom to absorb its load). Without those,
+  the survivors just inherit the dead node's traffic, get overwhelmed, and fall over one by one — a
+  **cascading failure**.
 - ❌ **Complex** — now you need a **load balancer** (a traffic director that decides which server each
   request goes to → Day 2), you have to keep **data consistent** across machines, and you have to
   figure out **where state lives** (more on that below). This complexity is the price of admission.
@@ -96,9 +100,11 @@ Once the database is your bottleneck (the DB trap above), you fix it in increasi
 Don't jump to the hard option first — climb the ladder.
 
 1. **Cache** (Redis / Memcached) in front of the DB. A cache is a small, fast store that holds
-   frequently-requested answers so you don't hit the DB every time. Since **most traffic is reads**
-   (people viewing data far more than changing it), caching the hot reads takes huge load off the DB
-   cheaply. → Day 3
+   frequently-requested answers so you don't hit the DB every time. In **read-heavy** systems (many
+   are — but confirm, don't assume), reads dominate: people view data far more than they change it, so
+   caching the hot reads takes huge load off the DB cheaply. Watch out though — **write-heavy** systems
+   (analytics ingestion, IoT sensor streams, logging pipelines, chat) flip this, and a read cache buys
+   you little there; you reach for sharding and write-optimized stores instead. → Day 3
 2. **Read replicas** — keep extra copies of the database. **Reads go to the replicas, writes go to the
    primary** (the one authoritative copy). This spreads out read load without touching write logic. → Day 8
 3. **Shard** — split the data itself across multiple databases, each owning a slice (e.g. users with
@@ -137,6 +143,79 @@ A quick reference for the terms above (each is defined in full where it first ap
   between requests. Stateless is what enables horizontal scaling.
 - **Object Storage (S3)** — a service for storing large files by key/URL, instead of in the DB.
 - **Load Balancer** — the tool that routes incoming traffic across your servers. → Day 2
+
+---
+
+## ⭐ Interview-completeness additions (audit pass)
+
+These are the concepts an interviewer expects you to reach for once you've established *how* to scale.
+They turn "add more machines" into decisions you can defend with numbers.
+
+- **Availability "nines" (and the math that justifies every replica).** Availability is the fraction of
+  time your system is actually up, and it's quoted in "nines." The intuition: each extra nine is an
+  order of magnitude less downtime, and it gets expensive fast. **99%** = ~3.65 days down per year.
+  **99.9%** ≈ 8.76 hours. **99.99%** ≈ 52.6 minutes. **99.999%** ("five nines") ≈ 5.26 minutes. Now the
+  part that actually drives design: **services chained in SERIES multiply, and the product is worse than
+  any single link.** If a request must pass through two components that are each 99.9% available, the
+  path is 0.999 × 0.999 ≈ **99.8%** — you *lost* availability by adding a dependency. But **redundant
+  components in PARALLEL** flip it: if either of two 99%-available replicas can serve the request, the
+  pair is 1 − (0.01 × 0.01) = **99.99%**. *That* is why "add a replica" or "add a second load balancer"
+  is the reflexive answer — parallel redundancy is how you buy nines.
+
+- **Latency vs throughput, tail latency, and performance vs scalability.** Keep two axes separate:
+  **latency** is how long one request takes; **throughput** is how many requests you handle per second.
+  And don't confuse **performance** (how fast a single request is) with **scalability** (does that speed
+  *hold* as load grows) — a system can be fast at 10 users and collapse at 10,000. The pro move is to
+  **reason in percentiles, not averages.** p50 (median) hides your worst experiences; **p95/p99** are the
+  slow tail. Why p99 matters: at scale, 1% of a million requests is 10,000 unhappy users every cycle,
+  and a single user often triggers many backend calls, so they *hit* the tail constantly. Averages lie;
+  percentiles tell the truth.
+
+- **Redundancy & failover patterns (the "how" behind removing a SPOF).** Removing a single point of
+  failure means having a backup ready and a way to switch to it. **Active-passive:** one node serves, an
+  idle standby waits — cheaper (you're paying for an idle box) but failover isn't instant (the standby
+  must detect the death and take over). **Active-active:** all nodes serve traffic simultaneously — no
+  wasted capacity and instant tolerance, but now you need a load balancer in front and you must
+  coordinate shared state across them. **N+1 provisioning** is the sizing rule: run one more node than
+  your peak load actually needs, so losing one still leaves enough. And none of this works without
+  **health checks** — the automated "are you alive?" pings that *detect* a failure so failover can fire.
+
+- **Where does state go once servers are stateless? (externalization options).** Making the web tier
+  stateless (from the State trap) just moves the question: where does the session live now? Three real
+  answers. **(1) A shared session store** like Redis — fast, central, every server reads it. **(2) The
+  database** — simpler, durable, but heavier per request. **(3) A signed token (JWT)** — the server
+  stores *nothing*; the client carries a cryptographically signed token that *is* its own proof of
+  login, and any server can verify it without a lookup. The **anti-pattern** to name and reject:
+  **sticky sessions** (pinning a user to the one server that has their session) — it re-introduces the
+  statefulness you just worked to remove and breaks the moment that server dies.
+
+- **Read/write ratio as a scaling lens — say it out loud.** Before choosing tools, estimate the ratio.
+  A **100:1 read-heavy** workload points you straight at **caches + read replicas** (cheap wins on the
+  read path). A **write-heavy** workload means caches and replicas won't save you — writes still all
+  land on the primary — so you reach for **sharding and write-optimized stores** much sooner. Stating
+  the ratio explicitly is what makes your scaling choice sound deliberate instead of guessed.
+
+- **Autoscaling / elasticity.** **Autoscaling** is automatically *adding* servers when a metric climbs
+  (CPU, requests-per-second, or queue depth) and *removing* them when it drops — you pay for capacity
+  only when you need it. The reason it works at all is the **stateless** tier: if any server can handle
+  any request, you can spin them up and kill them freely. The catch — and it ties the whole day together
+  — is that **the database is the thing autoscaling can't easily grow.** You can't just clone a stateful
+  primary the way you clone a web server, which is *exactly* why the Cache → Replicate → Shard ladder
+  exists: it's the manual, deliberate work of scaling the one tier elasticity can't.
+
+- **Object storage, one level deeper.** Three storage shapes worth distinguishing: **block storage** (a
+  raw virtual disk you attach to a server — fast, low-level), **file storage** (a shared filesystem with
+  folders and paths), and **object storage** (S3 — files addressed by a key/URL, built for massive
+  scale). Two details interviewers probe: **presigned URLs** — instead of routing an upload *through*
+  your app servers, you hand the client a temporary signed URL and it uploads **directly to S3**, so the
+  heavy bytes never touch your servers; and **storage tiers** — **hot** (accessed constantly, priciest),
+  **warm**, **cold**, and **archive** (rarely touched, cheap, slow to retrieve) — matching cost to how
+  often data is actually read.
+
+- **One-line CAP preview.** The moment your data lives on many machines, a network hiccup can split them
+  apart (a *partition*), and during that split you can't have both perfect **consistency** (everyone sees
+  the same data) *and* full **availability** (everyone still gets an answer) — you must trade one off.
+  That's **CAP**, and it's the whole story of → Day 7.
 
 ---
 

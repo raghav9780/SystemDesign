@@ -70,7 +70,12 @@ Concrete setup: Node A can't reach Node B (partition), and a write lands on A. A
 
 ## The 3 combinations (CP / AP / CA)
 - **CP** — sacrifices **availability** during a partition to stay consistent.
-  - Examples: HBase, MongoDB (default config), Zookeeper, etcd, clustered relational databases (RDBMS).
+  - Examples: HBase, Zookeeper, etcd, and **distributed/clustered** relational databases (RDBMS).
+    - ⚠️ **On "RDBMS":** a *single-node* RDBMS isn't distributed, has no network between nodes, and so has
+      **no partition** — it gets no meaningful CAP class at all (see the "CA single server" trap below). It's
+      the **distributed/clustered** RDBMS setup (with replicas across nodes) that earns a CAP class.
+    - **MongoDB is NOT a flat CP entry** — its behavior is tunable by write concern; see its PACELC class
+      below for the precise treatment.
 - **AP** — sacrifices **consistency** during a partition to stay available.
   - Examples: Cassandra, DynamoDB, Riak, CouchDB.
 - **CA** — **not achievable in a real distributed system**, because you can't magically prevent partitions.
@@ -118,9 +123,14 @@ is still happening then.
 - Classes to know:
   - **Cassandra / DynamoDB = PA/EL** — on **P**artition choose **A**vailability; **E**lse choose **L**atency.
     Speed and uptime first, both during failures and normal operation.
-  - **MongoDB = PA/EC** (tunable) — on partition choose Availability; **E**lse choose **C**onsistency.
-  - **RDBMS / Google Spanner = PC/EC** — **C**onsistency always. The cost: it gives up availability during a
-    partition, and accepts higher latency during normal operation, all to never be wrong.
+  - **MongoDB = PC/EC** (tunable) — on **P**artition it chooses **C**onsistency: the primary steps down and
+    the minority side **refuses writes** (consistency over availability); **E**lse it also favors
+    **C**onsistency (reads default to the primary). ⭐ **Nuance — why some sources say PA/EC:** it depends on
+    **write concern.** With `w:majority` a write must be acknowledged by a majority before returning →
+    PC-leaning (won't confirm on the minority side). With `w:1` (ack from the primary only) it leans PA —
+    faster, but a failover can lose that un-replicated write. So the "right" letters follow the config you run.
+  - **Distributed RDBMS / Google Spanner = PC/EC** — **C**onsistency always. The cost: it gives up
+    availability during a partition, and accepts higher latency during normal operation, all to never be wrong.
 
 ---
 
@@ -183,6 +193,91 @@ up overdrawn, the bank charges an **overdraft fee** or recovers the money **afte
 **The principle:** make an AP design "safe enough" by **bounding the worst case + reconciling after the
 network heals** — i.e. **DETECT + RECOVER instead of PREVENT.** Prevention (refusing all withdrawals) was
 simply too expensive here, because its cost is availability — the one thing the ATM most needs.
+
+---
+
+## ⭐ Interview-completeness additions (audit pass)
+CAP/PACELC give you the *labels*; interviewers push one level deeper into **what "consistency" actually
+means**, **how you tune it**, and **what machinery makes CP possible**. Here's the missing layer.
+
+### 1. Consistency models — the spectrum (the biggest gap)
+"Consistent" isn't one thing — it's a dial from strict to loose. Learn the three anchor points:
+- **Strong (linearizable):** every read sees the **most recent write**, as if there were only **one single
+  copy** of the data. The system behaves like a single machine even though it's many. This is exactly CAP's
+  "C" — and it's **expensive**, because every operation needs **coordination** across replicas before it can
+  return. Example: after you transfer money, *every* branch instantly shows the new balance.
+- **Causal:** operations that have a **cause-and-effect relationship** are seen in the **right order
+  everywhere**; operations that are *unrelated* can be seen in any order. The classic guarantee: you never
+  **see a reply before the question it answers**. Cheaper than strong (only causally-linked ops need
+  ordering), and usually "good enough" for human-facing apps.
+- **Eventual:** if writes **stop**, all replicas will **eventually converge** to the same value. That's *all*
+  it promises — it says **nothing about when**, and nothing about the ordering you'll see in the meantime.
+  You might read new-then-old-then-new. Example: a like count that settles after a few seconds.
+
+Intuition: strong = "always current, always coordinated, always slower"; eventual = "fast and always up, but
+temporarily wrong"; causal sits in between and preserves the orderings humans actually notice.
+
+### 2. The four client-centric (session) guarantees — name them
+These are weaker, *per-session* promises an AP system can still give you so it doesn't feel broken. Know all
+four by name (interviewers love the checklist):
+- **Read-your-own-writes:** after **you** write, **your** own reads see it. You post a comment, reload the
+  page, and it's there — even if other users don't see it yet.
+- **Monotonic reads:** you never see an **older** value on a **later** read. A comment you already saw
+  doesn't **vanish** on the next refresh (no going backwards in time).
+- **Monotonic writes:** your writes are applied in the **order you issued** them (write 1 lands before write 2).
+- **Writes-follow-reads:** if you **read X** and then **write Y**, anyone who sees **Y** must also see **X** —
+  a **reply** implies the **original** it responds to is already visible.
+
+⭐ **Cross-ref:** these four are exactly the anomalies **replication lag** causes (Day 8), viewed from the
+consistency-model side. Same phenomenon, two vocabularies: Day 8 says "lag caused the comment to vanish";
+here we say "monotonic reads was violated."
+
+### 3. Linearizability vs serializability (a classic trap)
+Same-sounding words, **orthogonal** guarantees — mixing them up is an instant tell:
+- **Linearizability** = CAP's **"C"** = a **RECENCY** guarantee on a **SINGLE object**: single-key operations
+  appear to happen in **real-time order** (once a write completes, all later reads see it). Says nothing about
+  transactions.
+- **Serializability** = ACID's **"I"** (isolation, Day 5) = a **multi-object TRANSACTION** guarantee: the
+  result is equivalent to running the transactions in **some serial order**. Says **nothing about real-time
+  recency** — that "serial order" needn't match wall-clock order.
+- **Strict serializability** = **both** at once (real-time order **and** transaction isolation). Google
+  **Spanner** is the poster child.
+- **Tell:** **CAP-C = single-object recency; ACID-I = multi-object isolation.**
+
+### 4. Tunable consistency — "AP" is a default, not a ceiling
+An AP database isn't *stuck* being weak — you can **dial consistency per request**:
+- **Cassandra** consistency levels: **ONE / QUORUM / ALL.** If you set reads and writes so that **W + R > N**
+  (replicas written + replicas read exceeds total replicas), the read and write sets **overlap**, so a read
+  is guaranteed to see the latest write → **strong consistency on demand**, at the cost of higher latency.
+- **DynamoDB:** **eventually-consistent read** (default, cheap) vs **strongly-consistent read** (a flag, roughly
+  **2x the cost**).
+- Takeaway: calling something an **"AP database"** describes its **default**, not a hard limit — you choose
+  the guarantee per operation and pay for it in latency/cost.
+
+### 5. Conflict resolution — how divergent copies merge (cross-ref Day 8)
+An AP system lets both sides accept writes during a partition, so when the partition **heals** the copies
+have **diverged** and must be reconciled. The toolkit:
+- **LWW (last-write-wins):** keep the write with the newest **timestamp.** Simple, but **lossy** (the losing
+  write is silently dropped) and vulnerable to **clock skew** across machines.
+- **Vector clocks / version vectors:** metadata that lets you **detect** whether two writes were **concurrent**
+  (true conflict) or one **causally followed** the other (safe to order) — instead of guessing by timestamp.
+- **CRDTs (conflict-free replicated data types):** data structures designed to **merge without losing data**
+  (e.g. a counter that sums both sides). Best when applicable.
+- Plus the repair machinery: **read-repair** (fix stale replicas on read), **anti-entropy** (background
+  sync), **hinted handoff** (a live node holds writes for a downed peer and delivers them later).
+- ⭐ **Full treatment is Day 8** — here just know the *names* and that conflict resolution is the price of AP.
+
+### 6. Consensus (Paxos / Raft) — what actually makes CP work
+CP systems (**Zookeeper, etcd, Spanner**) stay consistent *even during partitions* because they run a
+**consensus protocol** — **Raft** or **Paxos**. The rule: a write **commits only when a majority (a quorum)
+of nodes agrees** on it. Now watch what that does during a partition:
+- The **majority** side can still reach a quorum → it keeps committing writes, correctly.
+- The **minority** side **cannot** reach a majority → so it **refuses to serve.**
+
+⭐ That refusal **IS** the "sacrifice availability" of CP — it's not a bug, it's the design. By requiring a
+majority, the system makes it **impossible** for two partitioned halves to both accept conflicting writes
+(only one side can ever hold the majority). Consensus is the machinery that turns "we chose C" into a working
+guarantee.
 
 ---
 

@@ -155,3 +155,36 @@ mesh gives you mTLS everywhere for free."
   `$proxy_add_x_forwarded_for`, exact upstream-name matches. Intent was right; grammar costs a real config.
 - [x] **Naming much improved** ✅ — used "subset," "SSL/TLS termination," "L7" precisely (the recurring gap is closing).
 - [x] **Reverse-proxy structure in config = solid** ✅ (upstream pool, TLS listener, path routing, header forwarding).
+
+---
+
+## ⭐ Interview-completeness additions (audit pass)
+
+### A. Kubernetes Ingress + Ingress Controller — the modern "how do external requests reach my services?"
+The container-era version of §3's reverse proxy. Two things, easy to conflate:
+- **Ingress** = a **declarative rule object** (YAML). It just says the *what*: "host `api.foo.com`, path `/pay` → service `payments`." It's config, not a running process.
+- **Ingress Controller** = the actual **reverse-proxy pod** that *reads* those rules and does the work: **L7 routing + TLS termination**. Commonly **Nginx Ingress**, or Envoy-based like **Contour**.
+- ⭐ One-liner: **Ingress = the config; Ingress Controller = the reverse proxy enforcing it.** This is **north-south edge routing** (§7) for containerized systems — the same job as an Nginx `server`+`location` block, expressed as Kubernetes objects.
+
+### B. When a service mesh is NOT worth it (§7's cost side — interviewers always ask this)
+A mesh isn't free, and naming the cost is the senior signal:
+- **Latency** — every sidecar adds a **network hop on every call** (in + out through the local proxy).
+- **Resources** — roughly **~0.5 vCPU / ~50MB RAM per pod**, multiplied across every instance.
+- **Operational complexity** — control-plane upgrades, cert rotation, and debugging **two hops** per request.
+- **Verdict:** adopt only at **meaningful microservice scale**, where consistent **mTLS / retries / observability** pays for itself. For a handful of services, a **library** (in-process) or a **plain reverse proxy** is simpler and cheaper.
+- ⭐ Interview move: **name the cost, not just the benefit** — "I'd hold off on a mesh until we have enough services that consistent mTLS/observability outweighs a sidecar's per-call hop and ~0.5 vCPU/pod overhead."
+
+### C. WAF / DDoS — actually unpacked (§3/§6 listed these as bare words)
+The reverse proxy is the natural **chokepoint** to enforce both once, for everything behind it.
+- **WAF (Web Application Firewall)** — inspects **L7 request content** and blocks known **attack patterns** (**SQL injection, XSS, path traversal**) *before* they reach the app. **Rule-based** — e.g. the **OWASP Core Rule Set (CRS)**.
+- **DDoS mitigation** — the proxy/edge **absorbs volumetric floods** via **per-IP rate limiting**, **connection limits**, **SYN-flood protection**, and **Anycast** to spread load across **PoPs** (ties to Day 4's CDN/edge).
+- ⭐ Why here: one middleman = one place to enforce security policy for all backends (the §1 chokepoint principle applied to attacks).
+
+### D. (brief) Nginx event-driven vs Apache thread-per-connection
+- **Nginx** uses an **event-driven / async** model: a few **worker processes** each handle **thousands of connections** via an **event loop**.
+- **Apache** (classic) uses **thread/process-per-connection** — one worker tied up per open connection.
+- ⭐ Why it matters: Nginx handles **high concurrency (the C10k problem)** with a **small, stable memory footprint** — the reason it became the canonical reverse proxy.
+
+### E. (brief) Caveat the concentric model (§5)
+"**Load Balancer ⊂ Reverse Proxy ⊂ API Gateway**" is a great **teaching** model, but it's not a strict mathematical superset — an API gateway is a **SPECIALIZED reverse proxy** (adds app-layer smarts), not everything a reverse proxy is plus more.
+- ⭐ In an interview, **lead with "an API gateway is a specialized reverse proxy"** and use the concentric picture only as intuition.

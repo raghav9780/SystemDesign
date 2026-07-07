@@ -162,3 +162,52 @@ and publishes to Kafka (often via CDC, Day 8). The message can never be lost rel
 - [x] **Delivery semantics 3/3** ✅ (at-least-once + idempotent consumer + dedup ID — the hardest part).
 - [x] **Queue vs log distinction + pub/sub correct** ✅.
 - [x] **Poison message + DLQ** ✅.
+
+---
+
+## ⭐ Interview-completeness additions (audit pass)
+
+These are the follow-up questions an interviewer reaches for *after* you've nailed the core. Close them and you're airtight.
+
+### 1. "Why Kafka over Kinesis?" (know the AWS twin)
+**Amazon Kinesis** is AWS's managed Kafka-equivalent — same core idea: a **partitioned, replayable log**.
+- Partitions are called **SHARDS**; each has a **retention window** (24h default, up to **365 days**).
+- Ordering is **per-shard**, chosen by a **partition key** — same mental model as Kafka.
+- **Per-shard caps: 1 MB/s in, 2 MB/s out.** Scaling = adding shards.
+
+**When to pick which:**
+- **Kinesis** → you're already on AWS and want **zero-ops** (no brokers to run).
+- **Kafka** → **higher throughput**, **richer ecosystem** (Kafka Connect, Kafka Streams), and **no per-shard rate caps**.
+
+### 2. "How do you NOT lose messages when a broker crashes?" — acks + ISR + replication
+Three knobs that together give you durability guarantees:
+- **Replication factor** — how many brokers hold a copy of each partition (e.g. **3**).
+- **ISR (in-sync replicas)** — the replicas currently caught up to the leader.
+- **Producer `acks`:**
+  - `acks=0` — fire-and-forget. Fastest, **can lose data**.
+  - `acks=1` — leader confirms only. **Lost if the leader dies before replicating.**
+  - `acks=all` — wait for **all in-sync replicas**. **Safest.**
+
+**The safe combo:** `replication factor = 3` + `min.insync.replicas = 2` + `acks=all`
+→ a write **survives one broker failure with zero data loss** (2 replicas still have it).
+
+### 3. Consumer lag — the health metric to name
+> **lag = latest offset produced − offset the consumer has committed**
+
+= how far behind real-time the consumer is. **Rising lag = consumers can't keep up.**
+Fix: **autoscale consumers** (only useful **up to the partition count** — one consumer per partition max) or fix a **slow downstream** (DB, API) that's the real bottleneck.
+
+### 4. Retention vs log compaction — two ways to bound the log
+- **Time/size retention** (`retention.ms` / `retention.bytes`) — drop **old segments wholesale**. Good for **event streams** where old events stop mattering.
+- **Log compaction** — keep only the **LATEST value per key**, discarding superseded updates. Turns the log into a **replayable snapshot of current state** (e.g. latest address per user). This is what makes a topic usable as a **source of truth / changelog**.
+
+### 5. Fan-out on write vs on read (preview — feeds/notifications)
+- **Fan-out-on-write** — push a copy to **each consumer/feed at publish time**. Fast reads; **expensive for celebrities** (millions of copies per post).
+- **Fan-out-on-read** — compute the feed **at query time**. Cheap writes; heavier reads.
+Pub/sub is the **on-write mechanism**. This trade-off reappears in **feed / notification** design.
+
+### 6. Event sourcing (Phase 2 preview)
+Instead of storing **current state**, store the **immutable append-only log of events** and **derive state by replaying them** — the log/stream model taken to its logical end. Pairs with **CQRS** (separate write model and read model).
+
+### 7. Claim-check pattern (brief)
+Don't put **large blobs** in messages. Store the blob in **S3 / object storage** and put a **reference/pointer** in the message. Keeps the queue fast and within message-size limits.

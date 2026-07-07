@@ -181,3 +181,36 @@ Only an issue in multi-leader & leaderless (single-leader never has two writers)
 - [ ] **Naming precision:** read-your-own-writes ≠ monotonic reads (mislabeled Q2).
 - [ ] **Internal consistency:** don't pick "sync" in Q1 then solve a "lag" bug in Q2 — they contradict.
 - [x] **Quorum math W+R>N = 4/4, perfect** ✅. CRDT for conflict ✅. Fan-out + region-local durability follow-ups ✅ (senior-level).
+
+---
+
+## ⭐ Interview-completeness additions (audit pass)
+
+### 1. The other two session guarantees (rounding out Day 7)
+We already covered **read-your-writes**, **monotonic reads**, and **consistent-prefix**. The full set of four is:
+- **Monotonic writes** — your *own* writes are applied in the order you issued them (write A then B → B never lands before A).
+  A single leader preserves this naturally, since it serializes one client's writes in arrival order.
+- **Writes-follow-reads** — if you read X and then write Y (a reply that depends on X), anyone who sees Y is guaranteed to
+  also see X. Keeps cause-before-effect intact (e.g. no one sees your comment on a post they can't yet see).
+
+### 2. CRDT canonical examples (by type)
+- **Counters:** **G-Counter** (grow-only — increments only) and **PN-Counter** (Positive/Negative — supports both
+  increment and decrement).
+- **Sets:** **OR-Set** (Observed-Remove Set — supports add *and* remove without an add "losing" to a concurrent remove).
+- This is the machinery behind **Google-Docs-style collaboration** and **shopping-cart merges** — concurrent edits on
+  different replicas merge automatically with **no lost data** and no manual conflict resolution.
+
+### 3. The durability / latency / availability triangle (replication modes)
+- **Sync** — buys **durability**, pays in **latency + availability** (a write blocks on a slow/down replica; if it stalls,
+  you stall).
+- **Async** — buys **latency + availability** (leader never waits), pays in **durability** (a lost-writes gap on failover —
+  the un-shipped tail is gone).
+- **Semi-sync** — the pragmatic middle: wait for **one** ack (ideally a region-local replica), rest async. Most of the
+  durability, little of the latency. (See F-2 above.)
+
+### 4. Stale-read caveat (async replicas)
+- Reads served off an **async replica can be stale** (it's behind by the replication lag). Never route **read-after-write
+  critical** data — a just-placed order, an account balance, a just-updated setting — to a lagging replica; the user reads
+  their own action as "missing" and panics.
+- **Fix:** route those specific reads to the **leader**, or use **read-your-writes routing** (pin a user to a replica
+  known to be caught up past their last write). Non-critical reads can happily stay on the async replicas.

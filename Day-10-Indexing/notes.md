@@ -116,8 +116,10 @@ everyday **variants** you create with `CREATE INDEX` — interviewers expect you
   majority. **The fix for "I query a rare value of a low-cardinality column"** (see the RESOLVED follow-up). SQL Server
   calls it a "filtered index."
 - **Hash index** — backed by a hash table, not a tree. O(1) **exact-match** lookups (`WHERE x = ?`) — but **no range
-  queries and no sorting** (a hash scatters order). Use only when you never need ranges. (Postgres has them; LSM
-  memtables/Bloom filters are hash-flavored internally.)
+  queries and no sorting** (a hash scatters order). Use only when you never need ranges. (Postgres has them. Note:
+  an LSM **memtable is a *sorted* in-memory structure** — a skip list or red-black tree, e.g. RocksDB's skiplist —
+  precisely so it can be flushed to disk as a sorted SSTable in key order. Only the per-SSTable **Bloom filters** are
+  hash-based.)
 - **Expression / functional index** — index the *result of a function*, e.g. `CREATE INDEX ON users (LOWER(email))`
   so `WHERE LOWER(email) = ?` can use an index (a plain index on `email` couldn't, because the function changes the value).
 - **Full-text index** = the **inverted index** (§7). **Geospatial index** = geohash/quadtree/R-tree (§7).
@@ -173,3 +175,23 @@ any SSTable → reads touch several files); mitigate with **Bloom filters**. ✅
 - [x] **Selectivity/cardinality named correctly** ✅.
 - [x] **Covering index named + mechanism** ✅.
 - [x] **LSM mechanism (memtable → SSTable → compaction) correct** ✅.
+
+---
+
+## ⭐ Interview-completeness additions (audit pass)
+
+**1. EXPLAIN / the query planner (the biggest gap — this whole doc talked about *making* indexes, never about the DB *choosing* them).** Creating an index only makes it **available**; a **cost-based query planner** then decides whether to actually use it, comparing the estimated cost of an **index scan** vs a **seq scan** using **table statistics** (row counts, histograms of value distribution, selectivity). `EXPLAIN` shows you the plan the planner picked; `EXPLAIN ANALYZE` runs it and shows real timings. You want to see **Index Scan** or **Index Only Scan**; a **Seq Scan** means your index was ignored or is missing. Classic gotchas for "I made an index but it's not being used": **stale stats** (run `ANALYZE`), a **function or type mismatch** on the column that disables the plain index (see the expression-index note in §7b), or **low selectivity** making a full scan genuinely cheaper (the planner is right — the index just isn't worth it here).
+
+**2. B-Tree vs B+Tree (§2 actually describes a B+Tree but never names the distinction).** In a plain **B-Tree**, data / row-pointers live in **every** node. In a **B+Tree**, all values live only in the **leaf** level — internal nodes hold **only keys as a routing index**, and the leaves are chained together as a **sorted doubly-linked list**. Two wins: **wider fan-out** (internal nodes pack more keys → shallower tree → fewer disk reads), and **range scans walk the leaf links sideways** (exactly the "find start, walk sideways" trick in §2). When Postgres or InnoDB says "B-Tree index," it really means a **B+Tree**.
+
+**3. LSM uses a WAL / commit log (the missing durability piece).** The memtable lives in **RAM** — so a crash before flush would lose it. Fix: every write is **first appended sequentially to an on-disk write-ahead log (WAL)**, and *then* placed in the memtable. On crash before the SSTable flush, the memtable is **rebuilt by replaying the WAL**. This is why LSM writes are durable despite living in memory — and note it's a **second sequential write**, so it's part of write amplification too.
+
+**4. Compaction strategies — size-tiered vs leveled (§2 said "compaction" but not *how*).** **Size-tiered** (Cassandra default): merge SSTables of **similar size** together. Cheap writes, but a single key can live in **many** tables at once → higher **read + space** amplification. **Leveled** (RocksDB / LevelDB): keep **non-overlapping** SSTables organized into size-tiered **levels**, so a key sits in **at most one table per level** → lower read + space amplification, but far more background merging → **higher write** amplification. The read-vs-write-vs-space "pick your poison" from §2, made concrete: even *within* LSM you choose which axis to pay.
+
+**5. Space amplification (the named third axis).** = **physical bytes on disk ÷ logical size of the data**. LSM inherently carries it because superseded and deleted values **linger until compaction** removes them. Key detail: an LSM **delete is a TOMBSTONE** — a marker written *on top*, not an in-place removal — so a delete is *another write* and the old bytes stay until a merge cleans them. This completes the trio named in §2: **read, write, and space amplification — no engine minimizes all three.**
+
+**6. Index-only scan (the plan keyword for a covering index, §5).** When a query is **covered**, the planner reports an **"Index-Only Scan."** Caveat in Postgres: it still consults the **visibility map**, so a covering index fully avoids the heap **only when the table is well-vacuumed**. Postgres and SQL Server also let you attach payload columns via **`INCLUDE(...)`** — they ride along in the leaf to *cover* the query **without widening the sort key** (keeps the searchable part of the index lean).
+
+**7. Local vs global secondary indexes under sharding (the Day 9 ↔ Day 10 bridge).** Once a table is sharded, a secondary index can be organized two ways. **Local (document-partitioned):** each shard indexes only its **own** rows → **cheap writes** (all local), but a query on that index must **scatter-gather** across every shard (DynamoDB **LSI**). **Global (term-partitioned):** the index is partitioned **by the indexed term**, so entries may live on **other** shards → **fast, targeted reads** (go straight to the one partition), but writes must update **remote** index partitions and are typically **eventually consistent** (DynamoDB **GSI**).
+
+**8. Polish / naming.** For the **inverted index** (§7): the "word → docs" list is properly called a **postings list**, and the step that breaks text into terms is **tokenization / analysis**. For **geospatial** (§7): alongside geohash / quadtree / R-tree, name-drop **S2** (Google) and **H3** (Uber) — hierarchical cell systems that are the modern production answer to "index the globe."

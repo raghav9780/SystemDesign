@@ -195,3 +195,56 @@ answer-every-sub-part gap, third day running.)*
 - [x] **Naming precision** ✅ — "token bucket", "Lua script for atomicity", "race condition" all landed cleanly.
 - [x] **Implementation** ✅✅ — wrote a correct distributed atomic token bucket in Lua unprompted (senior-level),
   incl. a `cost` param and TTL cleanup.
+
+---
+
+## ⭐ Interview-completeness additions (audit pass)
+
+These are the "you'd lose a point if the interviewer probed" gaps. None change the core model — they sharpen the
+vocabulary so you can *name* the distinctions on demand.
+
+### 1. Concurrency limits vs rate limits (know the difference cold)
+A **rate limit** caps requests **over time** — "100 requests per minute." A **concurrency limit** caps requests
+**in flight at once** — "at most 10 simultaneous requests." They guard **different resources**:
+- **Rate limits** protect **volume / cost** — how much total traffic (and $$) you accept.
+- **Concurrency limits** protect a **finite pool** — DB connections, worker threads, an expensive downstream that
+  only handles N calls at a time.
+
+Why you often need **both**: a client can be *comfortably under its rate limit* and still wreck you. 50 slow
+concurrent calls (each holding a connection for 5s) exhausts your connection pool even though the client sends
+few requests per minute. The rate counter never trips; the pool dies anyway.
+
+**How concurrency is enforced:** not with a time-window counter — with a **semaphore / in-flight counter**.
+Increment on request **entry**, decrement on **completion** (success *or* error — decrement in a `finally`). Reject
+when the counter hits the cap. No time window involved; it's purely "how many are open right now."
+
+### 2. Rate limiting vs throttling vs load shedding (three different jobs)
+Interviewers use these interchangeably in casual speech but they are distinct mechanisms:
+- **Rate limiting** — **rejects** a *specific client* for exceeding **its own quota**. Per-key, deterministic,
+  proactive, returns **429**. "You've used your 100/min, come back later."
+- **Throttling** — **slows** rather than rejects. Queues/delays a client down to a sustainable pace instead of
+  turning it away. **Leaky bucket is throttling** — requests drain at a fixed rate, bursts wait their turn.
+- **Load shedding** — **system-wide triage**. Under overload the server deliberately **drops a fraction of ALL
+  traffic** (lowest-priority first) to stay alive — *regardless of whether any client is within its quota*.
+
+The clean framing: **rate limiting is per-client and proactive; load shedding is global and reactive to server
+health.** One asks "is *this caller* over *its* budget?"; the other asks "is *the server* about to fall over?"
+
+### 3. Sync vs async counter updates (the accuracy ↔ performance dial)
+This is the knob behind the local + distributed hybrid we built:
+- **Synchronous counting** — check/update the **shared Redis counter on the critical path of every request**.
+  **Accurate** (one true count), but adds a **round-trip per call** → latency + Redis load scale with traffic.
+- **Asynchronous counting** — each node decrements a **LOCAL budget** and **reconciles with the central store
+  periodically** (batched). **Much lower latency and Redis load**, at the cost of **temporary over-admission**
+  between syncs (nodes don't see each other's spend until the next reconcile).
+
+So the local-fallback / local-budget pattern isn't just a Redis-outage safety net — it's the **async point** on
+this dial: we trade a little accuracy for a lot of throughput.
+
+### 4. (brief) Sliding-window-log via a Redis sorted set
+The sliding-window-**log** algorithm maps cleanly onto a Redis **sorted set** of timestamps per key:
+- `ZREMRANGEBYSCORE key 0 (now - window)` — drop entries older than the window.
+- `ZCARD key` — count what remains; compare to the limit.
+- (`ZADD` the new timestamp on admit; set a TTL for cleanup.)
+Accurate but memory-heavy — it stores every request timestamp — which is exactly why sliding-window-*counter*
+exists as the cheaper approximation.
