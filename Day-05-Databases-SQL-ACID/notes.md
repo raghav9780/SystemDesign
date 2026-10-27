@@ -73,6 +73,38 @@ far faster than hunting around the disk to update data files in random places. S
 precisely because the log is append-only. (This same WAL is also the foundation of replication — Day 8
 ships the WAL to replica servers to keep them in sync.)
 
+#### Redo vs undo logging — the two jobs crash recovery has to do (pass 2)
+When the power dies, the data files can be wrong in **two opposite ways**, and each needs a different kind of
+log record:
+1. **A committed change never reached the data files** (it was still sitting in memory). Durability says it
+   must survive → we need to **re-do** it. A **redo record** stores the **new value** ("page 42, row 7: balance
+   → ₹0"). Recovery replays redo records forward.
+2. **An uncommitted change already reached the data files** (the DB flushed a dirty page early to free memory,
+   then crashed before the transaction committed). Atomicity says it must vanish → we need to **un-do** it. An
+   **undo record** stores the **old value** ("row 7: balance was ₹500"). Recovery uses it to roll back.
+
+Mini-example: Alice→Bob transfer. Txn T1 (committed) debited Alice but that page was only in memory; Txn T2
+(not committed) had already written a half-update to disk. On restart: **redo** T1 (re-apply the debit),
+**undo** T2 (restore the old value).
+
+**The classic recovery algorithm — ARIES** (used, in variations, by most disk-based engines) runs three passes:
+**analysis** (read the log to find which transactions were in flight and which pages may be stale) → **redo**
+(replay history forward, bringing pages to their exact state at the crash — even the losers' changes) →
+**undo** (roll back every transaction that never committed).
+
+**How real engines do it — they differ:**
+- **PostgreSQL's WAL is redo-only.** It has no undo log because of MVCC: an update writes a **new row
+  version** instead of overwriting the old one, and every version is tagged with the transaction that made it.
+  If that transaction aborted (or crashed before committing), its versions are simply **invisible** to everyone
+  — nothing needs undoing. Dead versions are later cleaned up by **VACUUM**.
+- **MySQL/InnoDB has both:** a **redo log** (for crash recovery of committed changes) and **undo logs**. InnoDB
+  updates rows **in place**, so the undo log keeps the old values — used to **roll back** aborted transactions
+  *and* to rebuild **older row versions for MVCC snapshot reads** (that's how a Repeatable Read transaction still
+  sees the old balance).
+- **Interview one-liner:** "Redo = new values, re-apply committed work after a crash (durability); undo = old
+  values, roll back uncommitted work (atomicity). Postgres needs only redo because MVCC never overwrites; InnoDB
+  keeps an undo log that doubles as its MVCC version store."
+
 ### Map each letter to the failure it prevents (don't just list ACID!)
 
 ⭐ A common interview mistake is to recite the four words. Better: tie each letter to the concrete disaster
@@ -111,6 +143,14 @@ Each higher level prevents one more phenomenon, at the cost of more locking/slow
 | Read Committed | dirty reads (common default) |
 | Repeatable Read | dirty + non-repeatable |
 | Serializable | all three (behaves as if sequential) — safest, slowest |
+
+> ⚠️ **Engine reality check (pass 2):** this table is the **SQL-standard minimum** — real engines often do
+> *more*. **PostgreSQL's Repeatable Read** is snapshot isolation, so it also prevents **phantom reads** (the
+> Postgres docs mark phantoms "allowed by the standard, but not in PG"); it still allows write skew.
+> **MySQL/InnoDB's Repeatable Read** gives plain `SELECT`s a consistent snapshot (no phantoms there), and for
+> *locking* reads (`SELECT … FOR UPDATE`, `UPDATE`, `DELETE`) it uses **next-key / gap locks** — it locks the
+> *gaps* between index entries so no one can insert a new matching row. Also: Postgres accepts "Read
+> Uncommitted" but treats it as Read Committed, so dirty reads never happen in Postgres.
 
 ### Race Condition (the umbrella concept) ⭐
 
@@ -174,6 +214,67 @@ When you need to stop transactions from clobbering each other, you lock the data
   else got there first → you **retry**. Best when contention is low and reads dominate (you rarely pay the
   retry cost). Analogy: you don't lock the door, but if you discover someone slipped in, you start over.
 
+### ⭐ The actual SQL (pass 2) — three ways to fix the overdraft / lost update
+Table: `accounts(id, balance, version)`. Alice (id = 1) has ₹500 and two ₹500 transfers race.
+
+**Fix 0 — the simplest: an atomic conditional update (no read-then-write at all).**
+```sql
+UPDATE accounts
+SET    balance = balance - 500
+WHERE  id = 1 AND balance >= 500;
+-- check "rows affected": 1 = success, 0 = insufficient funds → fail the transfer
+```
+Why it works: the read ("is there enough?") and the write happen in **one statement**, and the database
+row-locks the row while it runs. The second transfer waits, then re-checks `balance >= 500` against the
+**new** value (₹0) → matches 0 rows → rejected. No race window exists because the app never holds a stale
+read. ⭐ **Reach for this first** whenever the logic fits in one statement (counters: `SET likes = likes + 1`).
+
+**Fix 1 — pessimistic: lock the row, then read-modify-write.**
+```sql
+BEGIN;
+SELECT balance FROM accounts WHERE id = 1 FOR UPDATE;   -- exclusive row lock; the other txn WAITS here
+-- app checks: balance >= 500 ?
+UPDATE accounts SET balance = balance - 500 WHERE id = 1;
+COMMIT;                                                   -- lock released; the waiter now reads ₹0
+```
+Use when the logic between read and write is too complex for one statement and conflicts are **common**.
+Lock rows in a consistent order (lower id first) to avoid deadlocks (see Deadlock below).
+
+**Fix 2 — optimistic: version column + compare-and-set + retry.**
+```sql
+SELECT balance, version FROM accounts WHERE id = 1;       -- say: 500, version 7 (no lock taken)
+-- app computes new balance = 0
+UPDATE accounts
+SET    balance = 0, version = version + 1
+WHERE  id = 1 AND version = 7;                             -- only succeeds if nobody changed it since
+-- rows affected = 1 → done.  rows affected = 0 → someone else won → re-read and RETRY (or give up)
+```
+Use when conflicts are **rare** (e.g. editing a profile, a wiki page) — no one ever waits on a lock; the rare
+loser just retries. Under heavy contention it degrades into endless retries → switch to pessimistic.
+
+**Setting the isolation level explicitly:**
+```sql
+BEGIN;
+SET TRANSACTION ISOLATION LEVEL SERIALIZABLE;  -- or READ COMMITTED / REPEATABLE READ
+-- ... statements ...
+COMMIT;
+-- Postgres shorthand: BEGIN ISOLATION LEVEL SERIALIZABLE;
+-- MySQL: SET TRANSACTION ISOLATION LEVEL ... is issued *before* START TRANSACTION (applies to the next txn)
+```
+At Repeatable Read or Serializable, be ready to catch a **serialization failure** and retry the whole
+transaction — e.g. Postgres's `could not serialize access due to concurrent update`.
+
+⚠️ **Engine trap:** Postgres Repeatable Read **detects** a lost update (the second writer gets that error).
+MySQL/InnoDB Repeatable Read does **not** — a plain `SELECT` then `UPDATE` can still lose an update. So on InnoDB
+you must use Fix 0, 1, or 2 explicitly.
+
+**Two forward-refs:**
+- These are **single-database** locks. When the shared resource spans many app servers or services (e.g. "only
+  one worker may process this job"), you need a **distributed lock** — and because a lock holder can pause (GC,
+  network) and wake up after its lock expired, you protect writes with **fencing tokens** → **Day 18**.
+- A client retry after a timeout can apply the same transfer **twice** — locking doesn't stop that; an
+  **idempotency key** does → **Day 12**.
+
 ---
 
 ## ⭐ Overdraft Race (KEY correction)
@@ -202,7 +303,9 @@ It's tempting to just crank every transaction to Serializable and stop worrying.
 
 Serializable forces near-sequential execution, which means heavy locking → lots of contention (transactions
 queuing on each other) → more deadlocks → more retries → **throughput collapses**. You bought perfect
-safety by making the database slow for everyone.
+safety by making the database slow for everyone. (Nuance: Postgres's SSI-based Serializable doesn't add
+blocking locks — its cost shows up instead as more **serialization-failure aborts** your app must retry. Lock-based
+engines pay in waiting and deadlocks. Either way, throughput drops under contention.)
 
 ⭐ The right move is to **match the isolation level to the risk**: use Serializable only on the critical
 paths where a wrong answer is catastrophic (money, inventory), and use a cheaper level like **Read
@@ -328,7 +431,9 @@ you rarely need a distributed transaction in the first place.
 
 **Shared vs exclusive locks.** A **shared (read) lock** lets *many* readers hold it at once but blocks any
 writer — everyone can look, no one can change. An **exclusive (write) lock** can be held by only *one*
-transaction and blocks everyone else, readers and writers alike. `SELECT … FOR UPDATE` takes an
+transaction and blocks everyone else who wants a lock on that row — other writers and other *locking* readers.
+(In MVCC engines like Postgres/InnoDB a *plain* `SELECT` is **not** blocked: it just reads the older committed
+version from its snapshot.) `SELECT … FOR UPDATE` takes an
 **exclusive** lock on the rows it reads (so you can safely read-then-write), whereas a plain `SELECT` under
 MVCC takes **no lock at all** (it just reads its snapshot).
 
@@ -336,3 +441,31 @@ MVCC takes **no lock at all** (it just reads its snapshot).
 database** itself. The upside is fewer network round-trips (the logic runs right next to the data); the
 downsides are that it's harder to version-control, test, and scale, and it tends to lock you to one
 vendor's SQL dialect. The modern default is to keep logic in the **application tier**, not the DB.
+
+---
+
+## ⭐ Completeness additions (pass 2)
+
+**How SSI actually catches write skew — walk the on-call example.** Snapshot isolation alone lets both doctors
+go off call, because each transaction read a snapshot where the *other* doctor was still on call. Postgres's
+**SSI** (Serializable level, 9.1+) lets both run *without blocking*, but keeps track of **what each transaction
+read**. When Doctor A's transaction writes a row that Doctor B's transaction had *read* (and vice versa), SSI
+sees a dangerous **read-write dependency cycle**: "A's decision was based on data B changed, and B's decision
+was based on data A changed." No serial order could produce that outcome, so at commit one of them gets a
+**serialization failure** and must retry — and on retry it sees only one doctor on call and correctly refuses.
+⭐ The cost model is **optimistic**: no waiting, but some transactions get aborted under contention, so the app
+must have retry logic. (Alternative fix without Serializable: lock the rows you *read* — `SELECT … FROM
+doctors WHERE on_call FOR UPDATE` — so the two transactions are forced to take turns.)
+
+**2PL in a bit more depth (how lock-based engines get Serializable).** In two-phase locking, readers take
+**shared** locks and writers take **exclusive** locks, and — in the usual *strict* form — every lock is held
+until the transaction **commits or aborts**. Writers block readers *and* readers block writers (the opposite of
+MVCC's "readers don't block writers"), which is why 2PL is slow and deadlock-prone. To stop **phantoms**, it
+must also lock rows that *don't exist yet* — via **predicate locks** or the cheaper approximation, **index-range
+(next-key / gap) locks** — exactly what InnoDB does in its Serializable and locking-read paths. Remember again:
+**2PL (locking, one DB) ≠ 2PC (atomic commit across DBs, Day 19).**
+
+**Where Day 5 connects next:**
+- Distributed locks + fencing tokens → **Day 18**. Idempotency keys for safe retries → **Day 12**.
+- 2PC, Sagas, and the transactional outbox for cross-service transactions → **Day 19**.
+- WAL shipping as a replication method → **Day 8** (Extras + pass-2 §8). B-tree vs LSM storage → **Day 10**.

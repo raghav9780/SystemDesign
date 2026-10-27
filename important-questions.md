@@ -62,3 +62,11 @@ Essence: convert an unsafe dual-write into a **single atomic DB write** (order +
 **LSM-Tree — writes append, never seek.** Writes go first to an in-memory **memtable** (and a sequential write-ahead log for durability). When the memtable fills, it's flushed to disk as an immutable, sorted **SSTable** — a **pure sequential write**, no random seeks. Sequential writes are far faster than random ones, so **writes are cheap → write-optimized.** The cost is paid on **reads**: a key may live in the memtable or any of several SSTables, so a read may check multiple files (mitigated by **Bloom filters** to skip files that can't contain the key, and by **compaction** that merges SSTables in the background). Compaction also causes **write amplification** (data is rewritten repeatedly as it merges).
 
 **The essence:** B-Tree does the ordering work **at write time** (random in-place updates) so reads are cheap; LSM-Tree defers the work, taking cheap **sequential appends** now and paying at read/compaction time. **Databases:** B-Tree → **PostgreSQL / MySQL (InnoDB)**; LSM-Tree → **Cassandra / RocksDB / LevelDB** (also HBase, ScyllaDB).
+
+---
+
+**Q:** In leaderless replication with N=3 replicas, if you set W=2 and R=2, what consistency guarantee does W+R>N give and why? And what breaks if you drop to W=1, R=1? Give a concrete example.
+
+**A:** **W+R>N** means the write quorum and read quorum are guaranteed to **overlap in at least one replica** (pigeonhole principle). With W=2, R=2, N=3 (2+2=4 > 3), any read touches at least one replica that has the latest write — so the reader, after comparing the **version numbers/timestamps** of all responses and picking the newest, always sees the most recent write → **read-your-writes / strong-ish consistency**. Note: overlap alone isn't enough; the reader must still reconcile versions to select the latest.
+
+**W=1, R=1** (1+1=2 ≤ 3) destroys the overlap guarantee. Concrete failure: the write lands only on **Node A**; a later read hits only **Node B**, which hasn't received the replicated update yet → the reader gets **stale data**, breaking read-your-writes. It's faster (less coordination) but only **eventually consistent**.

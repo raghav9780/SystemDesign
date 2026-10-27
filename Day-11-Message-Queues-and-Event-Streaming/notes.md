@@ -55,7 +55,8 @@ Because networks drop packets and consumers crash mid-process, "deliver this" ha
 - **At-least-once** — retry until acked. **Never lost, but may arrive >once** (consumer processed it, crashed
   before acking → broker redelivers). **The practical default.**
 - **Exactly-once** — once, no loss, no dup. The holy grail — **genuinely hard**: "process it" and "ack it"
-  can't be made perfectly atomic across a network.
+  can't be made perfectly atomic across a network. (This is the **Two Generals problem**: over an unreliable link, the
+  sender can never be *certain* its last message — the ack — arrived, so one side must either risk a duplicate or risk a loss.)
 - ⭐ **THE KEY INSIGHT (Q3 — I nailed this):** make at-least-once *behave like* exactly-once with an
   **idempotent consumer** — processing the same message twice has the same effect as once.
   - How: unique message ID; consumer records handled IDs (DB/Redis) and **skips duplicates**. Or design a
@@ -117,7 +118,8 @@ Order is **not** guaranteed globally, because throughput needs **parallelism**, 
 | Superpower | Replay, retention, fan-out, streaming | **Flexible routing** | **Zero ops** (AWS runs it) |
 | Best for | Event streaming, log pipelines, analytics | Complex routing, task queues, RPC | "Just give me a queue" on AWS |
 - **RabbitMQ routing:** producer → **exchange** → routes to queues via **bindings**: *direct* (exact key),
-  *topic* (wildcards), *fanout* (broadcast). Routing flexibility = its signature strength.
+  *topic* (wildcards), *fanout* (broadcast), *headers* (match on message header attributes instead of the routing key).
+  Routing flexibility = its signature strength.
 - **SQS:** **Standard** = at-least-once + best-effort order + huge throughput; **FIFO** = exactly-once
   processing + strict order, lower throughput.
 
@@ -211,3 +213,221 @@ Instead of storing **current state**, store the **immutable append-only log of e
 
 ### 7. Claim-check pattern (brief)
 Don't put **large blobs** in messages. Store the blob in **S3 / object storage** and put a **reference/pointer** in the message. Keeps the queue fast and within message-size limits.
+
+---
+
+## ⭐ Completeness additions (pass 2)
+
+### 8. How a producer picks a partition — and why you can't casually add partitions
+- **With a key:** Kafka's default partitioner computes `murmur2(key) % number_of_partitions` → the same key always lands on
+  the same partition → per-key ordering (§7). This is Day 9's `hash % N`, inside Kafka.
+- **Without a key (`key=null`):** there's no ordering to protect, so the producer just **spreads** records across
+  partitions (modern clients fill a batch for one partition, then move to the next — "sticky" partitioning — for efficiency).
+- ⚠️ **Partition count can only go UP.** Kafka can add partitions to a topic but **cannot reduce** them (you'd recreate the topic).
+- ⚠️ **Adding partitions breaks key → partition mapping.** Go from 6 → 8 partitions and `hash(order-1001) % 8` usually
+  differs from `% 6`. New events for that order land on a **different** partition than its old events, so a consumer can
+  see them **out of order** around the change. Existing data is **not** moved. This is Day 9's "`% N` trap" again —
+  Kafka doesn't use consistent hashing here.
+- **So:** pick the partition count **up front with headroom** (it caps your consumer parallelism — §7: max useful consumers =
+  partitions). If you must grow a keyed, order-sensitive topic, the safe route is a **new topic** with more partitions and a
+  planned migration (drain the old one, switch producers).
+
+### 9. Consumer groups & rebalancing — what actually happens
+**The idea:** a consumer group is a team splitting the partitions between them. A **rebalance** is the team re-dividing the
+work whenever the team changes.
+- **Triggers:** a consumer **joins** (you scaled up), **leaves** cleanly (shutdown), or is **declared dead** — it stopped
+  sending heartbeats, or took too long between `poll()` calls (its processing loop got stuck; `max.poll.interval.ms`).
+  Also when partitions are added to the topic.
+- **Classic ("eager") rebalance = stop-the-world:** every consumer gives up *all* its partitions, then everything is
+  re-assigned. Nobody in the group processes anything during the pause.
+- **Cooperative (incremental) rebalance** — modern assignors (e.g. `CooperativeStickyAssignor`) move **only the partitions that
+  need to move**; everyone else keeps working.
+- **Why rebalances create duplicates:** a consumer was halfway through partition 3 and hadn't committed offsets for its last
+  few messages. Partition 3 moves to another consumer, which resumes from the **last committed** offset → those few
+  messages are processed **again**. One more reason the consumer must be **idempotent** (§6).
+- **Avoiding needless rebalances:** keep per-message processing short (or hand slow work to a thread pool and keep
+  polling); for rolling restarts, **static membership** (`group.instance.id`) lets a restarting consumer reclaim its
+  partitions without triggering a full rebalance.
+
+### 10. Offset commits — auto vs manual (and where offsets live)
+- Committed offsets are stored by Kafka itself in an internal topic, **`__consumer_offsets`**, per (group, partition).
+- **Auto-commit** (`enable.auto.commit=true` — the default; every `auto.commit.interval.ms`, default 5 s): the client
+  periodically commits "whatever I've polled so far". Easy, but the commit is **not tied to your processing**:
+  - Crash 4 s after the last auto-commit → the last ~4 s of messages are **redelivered** (duplicates).
+  - If you process asynchronously (hand messages to other threads), the offset can be committed **before** processing
+    finishes → crash → those messages are **lost** (silent at-most-once).
+- **Manual commit** (`enable.auto.commit=false`): **you** call `commit()` **after** processing succeeds → clean
+  **at-least-once** (the ack-after-processing rule in original §8). Use it for anything that matters (payments, orders).
+- **`auto.offset.reset`** — what to do when the group has **no** committed offset yet (brand-new group): `latest` (default —
+  only new messages from now on) or `earliest` (replay the whole retained log).
+
+### 11. 🛠️ Hands-on: a minimal Kafka producer + consumer (Python, `confluent-kafka`) — Rule F
+**Step 1 — create the topic** (6 partitions, 3 copies of each):
+```
+kafka-topics.sh --create --topic orders --partitions 6 --replication-factor 3 --bootstrap-server localhost:9092
+```
+**Step 2 — producer:**
+```python
+from confluent_kafka import Producer
+
+producer = Producer({
+    "bootstrap.servers": "localhost:9092",
+    "acks": "all",                    # wait for all in-sync replicas (addition 2)
+    "enable.idempotence": True,       # broker drops duplicates caused by producer retries (pass-2 §12)
+})
+
+def on_delivery(err, msg):            # called once per message when the broker answers
+    if err is not None:
+        print(f"delivery FAILED: {err}")          # alert / retry / store for later
+    else:
+        print(f"stored in {msg.topic()}[{msg.partition()}] at offset {msg.offset()}")
+
+producer.produce(
+    "orders",
+    key="order-1001",                 # partition key → all events of this order share one partition (ordered)
+    value='{"order_id":"order-1001","event":"OrderPlaced","total_cents":4999}',
+    on_delivery=on_delivery,
+)
+producer.flush()                      # block until every buffered message is acknowledged
+```
+- `produce()` is **asynchronous** — it only puts the message in a local buffer; the client batches and sends it.
+  That's why there's a delivery callback, and why you `flush()` before exiting (or messages in the buffer are lost).
+- `key` decides the partition (pass-2 §8); `value` is just bytes — JSON here.
+
+**Step 3 — consumer (manual commit, idempotent):**
+```python
+import json
+from confluent_kafka import Consumer
+
+consumer = Consumer({
+    "bootstrap.servers": "localhost:9092",
+    "group.id": "payment-service",    # consumers with the same group.id split the partitions
+    "enable.auto.commit": False,      # WE commit, only after processing succeeds
+    "auto.offset.reset": "earliest",  # new group → start from the oldest retained message
+})
+consumer.subscribe(["orders"])
+
+try:
+    while True:
+        msg = consumer.poll(1.0)              # wait up to 1 s for a message
+        if msg is None:
+            continue                          # nothing yet
+        if msg.error():
+            print(msg.error())
+            continue
+        event = json.loads(msg.value())
+        if not already_processed(event["order_id"]):     # idempotent consumer: dedup by business ID
+            charge_card(event)                           # the side effect
+            mark_processed(event["order_id"])            # ideally in the SAME DB transaction as the side effect
+        consumer.commit(message=msg, asynchronous=False) # commit AFTER processing → at-least-once
+finally:
+    consumer.close()                          # leave the group cleanly → fast rebalance
+```
+- Line by line: `group.id` puts this process in the team; `subscribe` asks for the topic (the group decides which
+  partitions *this* process gets); `poll` fetches (pull model, §5); the `already_processed` check makes redeliveries
+  harmless; `commit` after the work = at-least-once; `close()` triggers an orderly rebalance.
+- `already_processed` / `mark_processed` are your own functions — e.g. a `processed_events` table with a **UNIQUE** constraint
+  on the ID (same durable-dedup idea as Day 12's resolved follow-up).
+
+**Step 4 — run two copies of the consumer** and watch the 6 partitions split 3/3 (a rebalance). Kill one → its 3
+partitions move to the survivor.
+**Step 5 — check lag:**
+```
+kafka-consumer-groups.sh --describe --group payment-service --bootstrap-server localhost:9092
+```
+Shows, per partition, `CURRENT-OFFSET` (committed), `LOG-END-OFFSET` (latest), and `LAG` (the difference — addition 3).
+
+### 12. Idempotent producer (and Kafka transactions) — duplicates on the WRITE side
+- **The problem:** the producer sends a message, the broker stores it, but the **ack is lost** → the producer retries → the
+  log now holds the message **twice**. (§6 handled duplicates on the *consumer* side; this is the *producer* side.)
+- **The fix:** with `enable.idempotence=true` the broker gives each producer a **producer ID**, and the producer numbers its
+  messages per partition (**sequence numbers**). If the broker receives a sequence number it has already written, it
+  **drops the duplicate** (and still acks). Retries become safe. In the **Java client**, `acks=all` is the default since Kafka 3.0, and idempotence is on by default since **3.0.1 / 3.1.1 / 3.2.0** (a bug kept it off in 3.0.0 and 3.1.0) — as long as no conflicting setting (e.g. `acks=1`) is present. ⚠️ **librdkafka** — the engine under `confluent-kafka` (the Python code above), Go and .NET clients — still defaults `enable.idempotence=false` (its `acks` default is already all), which is exactly why the snippet sets it explicitly. Rule: **always set it yourself; never rely on a client default.**
+- **Limits:** it covers retries of one producer session writing to Kafka. It does **not** stop your *application* from calling
+  `produce()` twice for the same business event, and it does nothing for side effects outside Kafka.
+- **Kafka transactions** go one step further: write to **several partitions** (and commit consumer offsets) **atomically** —
+  all or nothing — for consume → transform → produce pipelines (Kafka Streams' "exactly-once"). Consumers must use
+  `isolation.level=read_committed` to skip aborted writes. Still only *inside* Kafka (§6's caveat stands).
+
+### 13. Retries done right — exponential backoff + jitter, concretely
+**Step 1 — only retry what can succeed later.**
+- **Retryable (transient):** timeouts, connection refused, `503`, `429`, a DB deadlock.
+- **Not retryable (permanent):** malformed JSON, validation failure, `400`/`404`, "card declined". Retrying a poison
+  message just burns time → send it **straight to the DLQ**.
+
+**Step 2 — wait longer each time (exponential backoff).** Retrying instantly hammers a downstream that's already
+struggling. Double the wait each attempt: 100 ms, 200 ms, 400 ms, 800 ms … up to a **cap** (e.g. 10 s), and a **max
+number of attempts** (e.g. 5) before giving up → DLQ.
+
+**Step 3 — add jitter (randomness).** If 10,000 clients all failed at the same instant, plain backoff makes them all retry
+at the same instants too (+100 ms, +200 ms …) — synchronized waves that knock the service over again (a "thundering herd").
+**Full jitter** (from the well-known AWS Architecture Blog analysis) picks a **random** wait between 0 and the backoff:
+```python
+import random, time
+
+def call_with_retries(fn, max_attempts=5, base=0.1, cap=10.0):
+    for attempt in range(max_attempts):
+        try:
+            return fn()
+        except TransientError:
+            if attempt == max_attempts - 1:
+                raise                                   # out of attempts → caller sends to DLQ
+            backoff = min(cap, base * 2 ** attempt)     # 0.1, 0.2, 0.4, 0.8 … seconds, capped
+            time.sleep(random.uniform(0, backoff))      # full jitter: spread clients out randomly
+```
+- `TransientError` stands for "the retryable kinds" — permanent errors are not caught, so they fail fast.
+- Deeper treatment (circuit breakers, retry budgets) → **Day 21**.
+
+### 14. Head-of-line blocking — why a stuck message hurts a whole partition
+- **The idea:** in an ordered lane, the item at the **front** blocks everyone behind it — like one slow car on a single-lane road.
+- **In Kafka:** a consumer processes a partition **in order** and commits offsets in order. If message #500 keeps failing
+  and you retry it *in place* (sleep, retry, sleep …), messages #501, #502 … in that partition all **wait** — even though
+  they're for completely different orders. Lag on that partition climbs while others are fine.
+- **Fixes:**
+  - **Retry topics (non-blocking retries):** on failure, publish the message to `orders-retry-1` (consumed after a delay), then
+    `orders-retry-2` (longer delay), then the **DLQ**; commit the original offset and **move on**. The main lane keeps flowing.
+    Trade: that one message is now processed **out of order** relative to its key — fine for independent events, not
+    for strictly ordered ones (for those you must block, or park all later events of the *same key* too).
+  - **Bounded retries in place** (e.g. 3 quick tries with backoff) before diverting.
+- Same idea in classic queues: SQS/RabbitMQ use a **max-receive-count → DLQ** policy so a poison message can't block forever.
+
+### 15. Hot partitions — diagnosis and fixes
+- **Symptom:** one partition's lag climbs while the others are near zero; one consumer is pegged at 100% CPU, the rest idle.
+- **Cause:** **key skew** — one key (a giant merchant, a celebrity user, `country=US`) produces a huge share of events, and
+  every event with that key goes to one partition (= one consumer). Adding consumers **doesn't help** — one partition can
+  only be read by one consumer in the group. (Day 9's access skew, in a queue.)
+- **Fixes:**
+  - **Better key:** use a higher-cardinality key (`order_id` instead of `merchant_id`) if per-merchant ordering isn't truly needed.
+  - **Salting / compound key:** `merchant_42#0 … merchant_42#7` spreads that merchant over 8 partitions. You keep
+    ordering **within each sub-key** only — acceptable when ordering is per order, not per merchant.
+  - **Dedicated topic** for the whale, with its own consumers.
+  - **Speed up the consumer** for that partition (batch DB writes, parallelize per key inside the consumer while
+    preserving per-key order).
+  - **Backpressure/throttle** the noisy producer (quotas) if it's abusive rather than legitimate.
+
+### 16. Backpressure — the concrete toolkit
+Backpressure = **the slow side signals "slow down" to the fast side** instead of silently drowning.
+- **Pull-based consumption** (Kafka, SQS) is natural backpressure: a busy consumer simply polls less (§5).
+- **Prefetch limits** for push brokers: RabbitMQ's prefetch count = "send me at most N unacked messages" — the broker
+  stops pushing when the consumer is full.
+- **Bounded buffers:** an in-memory queue inside your service should have a **max size**; when full, block the producer
+  or reject (e.g. HTTP **`429`/`503`** to callers) — never grow until the process runs out of memory.
+- **Autoscale consumers on lag/queue depth** (e.g. SQS `ApproximateNumberOfMessagesVisible`, Kafka consumer lag) — but
+  only up to the partition count for Kafka.
+- **Load shedding:** drop or defer low-priority work (analytics) to protect critical work (payments).
+- Kafka's durable log is itself a huge buffer — days of retention mean a slow consumer falls behind *without data loss*,
+  then catches up.
+
+### 17. CDC as the outbox relay (finishing §10)
+- **CDC (Change Data Capture)** reads the database's own change log — Postgres **WAL**, MySQL **binlog** — and turns every
+  committed insert/update/delete into an event. Tool to name: **Debezium** (streams DB changes into Kafka).
+- **Outbox + CDC:** your transaction writes the order row **and** an `outbox` row; Debezium tails the log, sees the committed
+  outbox row, and publishes it to Kafka. No polling loop, no dual write, and the event appears **only if** the transaction
+  committed. Delivery is still at-least-once → consumers stay idempotent. Deep dive → **Day 19**.
+
+### 18. SQS specifics worth knowing
+- **Visibility timeout** (original §8) must be **longer than your processing time**; otherwise the message reappears while you're still
+  working on it → a second worker processes it too.
+- **FIFO queues:** ordering per **message group ID**; deduplication uses a **deduplication ID** (or a hash of the body),
+  and a duplicate sent within the **5-minute deduplication interval** is accepted but not delivered again.
+- **Redrive policy:** `maxReceiveCount` → after that many failed receives, SQS moves the message to the DLQ.

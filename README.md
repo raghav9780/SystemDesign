@@ -27,7 +27,7 @@ Author: **Raghav Gupta** | Mentor: Alex | Started: 2026-06-11 | Level at start: 
 | 12 | APIs (REST/GraphQL/gRPC, gateway, idempotency) | 1 | ✅ Done | 9/10 |
 | 13 | Proxies & Reverse Proxies (Nginx, service mesh) | 1 | ✅ Done | 9/10 |
 | 14 | Rate Limiting (token/leaky bucket, sliding window, Redis+Lua) | 1 | ✅ Done | 8/10 |
-| 15 | Back-of-Envelope Estimation | 1 | ⬜ Next | — |
+| 15 | Back-of-Envelope Estimation | 1 | ✅ Done | 8.5/10 |
 
 ### Phase 2 roadmap (set by the curriculum audit — Days 16–24 fill the biggest interview gaps)
 | Day | Topic | Why it was added |
@@ -45,10 +45,8 @@ Author: **Raghav Gupta** | Mentor: Alex | Started: 2026-06-11 | Level at start: 
 
 *(Days 31–60 detailed as we progress; Phase 3 real-design bank is in `CURRICULUM-REFERENCE.md` §4.)*
 
-> ⚠️ **Phase 1 brief enrichments:** the audit found gaps to fold into Days 8–15 *before* I teach them
-> (e.g. Day 8 leaderless + quorum W+R>N; Day 9 consistent hashing + Snowflake IDs; Day 10 LSM internals +
-> geospatial; Day 11 delivery semantics + DLQ + Outbox; Day 14 distributed rate-limiting + Redis Lua).
-> Days 1–7 already taught get retro-notes only if a gap is interview-critical. Full list: `CURRICULUM-REFERENCE.md` §3.
+> ✅ **Phase 1 brief enrichments — folded in.** The audit's gap list (`CURRICULUM-REFERENCE.md` §3) was applied
+> to every Day 1–15 note, followed by a second accuracy + completeness pass (see audit section below).
 
 ---
 
@@ -75,6 +73,7 @@ Author: **Raghav Gupta** | Mentor: Alex | Started: 2026-06-11 | Level at start: 
   were unspoken clauses — the 8× consequence, the `Retry-After` purpose, why-lazy/why-atomic/why-expire. The
   *code* was senior-level; the *score* fell only because the "why" went unsaid. Same as Day 13 Req 4, Day 8 Q3,
   Day 9 Q5. **A "why?" or "name the specific X" is a scored box — tick every one.**
+- ⭐ **Unit conversions in estimation (Day 15).** Bytes→GB = **÷10⁹**, bytes→TB = **÷10¹²** (anchor: 10¹² B = 1 TB). Day 15 lost points to a 1000× bytes→GB slip. Also ×8 for bytes→bits in bandwidth.
 - Finish thoughts: diagnose → prescribe. *(largely solved — recent answers structured well)*
 - Use precise vocabulary / proper names ("chunks" not "packets", "JWT" not "IndexedDB").
 - ⭐ SIGNATURE LESSON: **state lives in a SHARED store, never on the server.**
@@ -88,7 +87,7 @@ consistency-model spectrum, WebSocket/SSE, Kinesis, vector/time-series DBs, K8s 
 reads top-to-bottom as complete prep for that topic.
 
 ## 📈 Stats
-- Days done: 14/60 | Avg score: **8.1/10** | Trend: 7 → 8 → 8(retry) → 8 → 7.5 → 8 → 7.5 → 7 → 7 → **9.5** → **9.5** → **9** → **9** → 8 (Day 14: knowledge ~9.5, score capped by unspoken "why" sub-parts — a delivery gap, not a knowledge gap)
+- Days done: 15/60 | Avg score: **8.1/10** | Trend: 7 → 8 → 8(retry) → 8 → 7.5 → 8 → 7.5 → 7 → 7 → **9.5** → **9.5** → **9** → **9** → 8 → **8.5** (Day 15: QPS chain clean; lost points on a bytes→GB 1000× slip + skipped bandwidth/"so what" sub-parts)
 - 🎯 Concept mastery solid; gap is INTERVIEW CRAFT + COMPLETENESS:
   (1) name the category not just the example, (2) structure answers / don't ramble,
   (3) justify by CONSEQUENCE, (4) answer EVERY part of a multi-part question,

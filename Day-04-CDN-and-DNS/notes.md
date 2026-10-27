@@ -56,6 +56,8 @@ A DNS record isn't always "name → IP." The common types:
 - **CNAME** — an **alias**: points one name at *another name* (e.g. `www.site.com` → `site.com`) instead of an IP.
 - **MX** — **Mail eXchange**: says which server receives email for the domain.
 - **NS** — **NameServer**: says which server is authoritative for the domain.
+- (The rest of the set — **SOA, TXT, PTR, SRV, CAA** — plus the **CNAME-at-apex** problem and its
+  **ALIAS/ANAME** fix are in the pass-2 section at the end.)
 
 ---
 
@@ -63,7 +65,9 @@ A DNS record isn't always "name → IP." The common types:
 
 Normally one IP belongs to one machine. **Anycast** breaks that rule on purpose: the *same* IP is
 **announced from many data centers at once**, and the internet's routing automatically sends you to the
-**nearest/healthiest** one. It's like a hotline number that rings through to whichever call center is
+**nearest** one — "nearest" in network terms (the shortest BGP route), which is usually but not always the
+geographically closest. "Healthiest" happens because a failing site **stops announcing** the IP, so routers
+stop sending traffic there. It's like a hotline number that rings through to whichever call center is
 closest to you — you dial one number, but who answers depends on where you are.
 
 Why it matters — three wins fall out of it for free:
@@ -88,6 +92,8 @@ The reason this matters is pure physics — distance is latency. A round trip fr
 ⭐ What belongs on a CDN: **static** content — images, video, CSS, JS, fonts — files that are the *same for
 everyone*. You do **not** put dynamic or user-specific content there (your personalized feed, your account
 balance), because that has to be freshly computed per request and isn't shareable across users.
+(Nuance: dynamic traffic can still *pass through* a CDN uncached and get faster — see "dynamic acceleration"
+in the pass-2 section.)
 
 ### How the edge gets the content — fill methods
 
@@ -192,7 +198,8 @@ mechanism labelled.
 
 **2. Negative caching (NXDOMAIN).** Resolvers don't only cache *successes* — they cache **failures** too. When a
 name genuinely doesn't exist, the authoritative server returns **NXDOMAIN** ("no such domain"), and the resolver
-caches that *negative* answer (its lifetime comes from the **minimum TTL field in the domain's SOA record**). So
+caches that *negative* answer (per RFC 2308 its lifetime is the **smaller of the SOA record's own TTL and the
+SOA's "minimum" field** — the SOA record is explained in the pass-2 section). So
 if a bot or a fat-fingered typo hammers a nonexistent name, the resolver answers "nope" straight from cache
 instead of walking the whole root → TLD → authoritative chain every time. This is the DNS analogue of the
 **cache-penetration** problem from Day 3 (caching the "not found" so misses don't stampede the source).
@@ -242,6 +249,181 @@ API call**. Trade-off vs versioned URLs: **versioned URLs** update **instantly w
 URL is just abandoned) but force you to **change every reference** to the file; **tag purge** needs an explicit
 call and brief propagation but requires **no URL changes** — great for content you can't easily re-reference
 everywhere.
+
+---
+
+## ⭐ Completeness additions (pass 2)
+
+### 1. The DNS chain, with every piece named
+Section A's 8 steps, with the official names an interviewer may use:
+- **Stub resolver** — the tiny DNS client built into your OS. It doesn't hunt for answers itself; it just
+  asks one configured server and waits. Before asking, the OS also checks the **hosts file**
+  (`/etc/hosts` on Linux/Mac) — a local hand-written name→IP list that overrides DNS.
+- **Router cache** — many home/office routers run a small DNS forwarder that caches answers; not all do.
+- **Recursive resolver** — your ISP's resolver or a public one (`8.8.8.8` Google, `1.1.1.1` Cloudflare). It
+  does the root → TLD → authoritative legwork and caches the results for everyone it serves.
+- **Root → TLD → authoritative nameserver** — the iterative walk (audit item 1).
+- Every layer caches **positive** answers (here's the IP) and **negative** answers (NXDOMAIN — audit item 2),
+  each for its TTL.
+
+### 2. The full record-type set — and why a CNAME can't live at the apex
+Section A had A, AAAA, CNAME, MX, NS. The rest of the set, each with what it's for:
+- **SOA (Start of Authority)** — the zone's "header card." Exactly one per zone, at the top. It names the
+  primary nameserver and an admin email, carries a **serial number** (bumped on every change so secondary
+  nameservers know to re-copy the zone), refresh/retry/expire timers for those secondaries, and the
+  **minimum** field used for negative-caching TTL.
+- **TXT** — free-form text attached to a name. Sounds useless, but it's how you **prove you own a domain**
+  ("add this TXT value and we'll verify it" — Google, AWS certificates, etc.) and how email anti-spoofing works:
+  **SPF** (which servers may send mail for me), **DKIM** (public key to verify mail signatures), **DMARC**
+  (policy if those checks fail).
+- **PTR (Pointer)** — **reverse DNS**: IP → name, the opposite of an A record. Lives in a special zone
+  (`in-addr.arpa` for IPv4). Main real-world use: mail servers check that a sending IP has a sensible PTR
+  before trusting it.
+- **SRV (Service)** — says **where a service lives, including the port**: `_sip._tcp.example.com` → priority,
+  weight, port 5060, host `sip1.example.com`. Lets clients discover "which host *and port* runs service X"
+  (used by SIP, XMPP, LDAP/Active Directory, some service-discovery systems).
+- **CAA (Certification Authority Authorization)** — says **which certificate authorities may issue TLS
+  certificates** for your domain (e.g. only Let's Encrypt). CAs must check it before issuing, so a random CA
+  can't be tricked into minting a cert for you.
+
+**The CNAME-at-apex problem.** The **apex** (or "zone root," "naked domain") is `example.com` itself, as opposed
+to `www.example.com`. Suppose your site is hosted on a load balancer or CDN whose address is a *name* (e.g.
+`my-lb-123.elb.amazonaws.com`) whose IPs change over time — you'd naturally want `example.com CNAME
+my-lb-123...`. **You can't.** The DNS rule (RFC 1034) is: **if a name has a CNAME, it may have no other records
+at all** — because a CNAME means "this name is *entirely* an alias for that other name; go ask there for
+everything." But the apex **must** have an **SOA** and **NS** records (that's what makes it a zone), and usually
+**MX** (email) and **TXT** too. A CNAME there would contradict them, so it's forbidden.
+
+**The fix: ALIAS / ANAME / CNAME flattening.** DNS providers invented a record that *behaves* like a CNAME but
+*answers* like an A record: the **authoritative server itself looks up the target's current IPs** and returns
+plain **A/AAAA** records to the client. To the outside world the apex just has A records (legal next to
+SOA/NS/MX), while you still get "follow that name" convenience. Names differ by vendor: **Route 53 "alias"
+records**, **ALIAS/ANAME** at several DNS providers, **CNAME flattening** at Cloudflare. Interview line: *"Use a
+CNAME for `www`; for the bare domain use an ALIAS/flattened record, because a CNAME can't coexist with the
+apex's SOA and NS records."*
+
+Summary (reference only, after the teaching above):
+| Record | Maps | Typical use |
+|---|---|---|
+| A / AAAA | name → IPv4 / IPv6 | the normal lookup |
+| CNAME | name → another name | `www` → CDN/LB hostname (not at apex) |
+| ALIAS/ANAME | apex name → name, answered as A | `example.com` → LB/CDN |
+| NS | zone → its nameservers | delegation |
+| SOA | zone metadata | serial, timers, negative-cache TTL |
+| MX | domain → mail servers | email delivery |
+| TXT | name → text | domain verification, SPF/DKIM/DMARC |
+| PTR | IP → name | reverse DNS, mail checks |
+| SRV | service → host + port | service discovery |
+| CAA | domain → allowed CAs | certificate-issuance control |
+
+### 3. Route 53 routing policies — the complete list
+Audit item 4 described geo/latency/weighted/failover in general. AWS Route 53's actual policy names (8 of them):
+- **Simple** — one record, one answer (or several IPs returned together, no health checks). The default.
+- **Weighted** — split answers by weights, e.g. 95/5 → **canary** releases or gradual migrations.
+- **Latency** — answer with the AWS Region that has the **lowest measured latency** for that user's network.
+- **Geolocation** — answer by **where the user is** (continent/country/state) — for data-residency rules,
+  language-specific content, licensing.
+- **Geoproximity** — answer by **distance between user and your resources**, with a **bias** knob to grow or
+  shrink a region's catchment area (shift traffic toward a bigger region).
+- **Failover** — **active-passive**: return the primary while its **health check** passes, the secondary when it
+  fails.
+- **Multivalue answer** — return **up to 8 healthy records** at random, so the client has several to try —
+  "DNS round robin with health checks."
+- **IP-based** — route by the **user's IP range** (CIDR blocks you list), e.g. send a known ISP's users to a
+  specific endpoint.
+Health checks can be attached to most of these, so an unhealthy endpoint is dropped from answers — that's the
+**GSLB** behaviour. One more detail: to guess the user's location, Route 53 can use the **EDNS Client Subnet**
+extension (EDNS0), in which the resolver forwards part of the *user's* IP — this softens the "resolver is far
+from the user" problem from audit item 4.
+
+### 4. Anycast vs GeoDNS — the comparison interviewers ask for
+Both send users somewhere close, at different layers:
+- **GeoDNS** decides **once, at lookup time**, by handing different IPs to different resolvers. Flexible
+  (any rule you like: weights, geography, health) but **coarse** — it sees the resolver not the user, and the
+  answer is stuck in caches for the TTL, so failover waits on TTLs.
+- **Anycast** decides **per packet, in the network**: one IP everywhere, BGP routing delivers to the nearest
+  site. **Fast failover** (a dead site withdraws its route — no cache to wait out) and natural **DDoS
+  spreading**, but less control (you can't say "send exactly 5% to Frankfurt") and it needs your own network
+  presence. It's best for short, stateless exchanges like DNS queries and CDN edges; a route change mid-way can
+  move a long TCP connection to a different site, which CDNs engineer around.
+- Real systems combine them: e.g. Anycast to reach the nearest CDN edge, GeoDNS/latency routing to pick the
+  origin region.
+
+### 5. CDN fundamentals: the cache key, `Vary`, and dynamic acceleration
+- **Cache key** — how the edge decides "do I already have *this*?" By default it's roughly **host + path +
+  query string**. If your URLs carry junk query params (`?utm_source=...`), each variant becomes a separate cache
+  entry and your **hit ratio** collapses — so CDNs let you **strip or ignore** params in the key. Conversely, if
+  the response depends on something *not* in the key, you risk serving one user's variant to another.
+- **`Vary` header** — the origin's way of saying "my response differs by this request header, so include it in
+  the key." `Vary: Accept-Encoding` → keep separate gzip and brotli copies (safe and common). But `Vary:
+  User-Agent` or `Vary: Cookie` multiplies variants into thousands → hit ratio near zero. Rule: vary on as few,
+  low-variety headers as possible.
+- **Static vs dynamic — dynamic acceleration.** You don't *cache* a personalised feed — but routing it through
+  the CDN still helps: the user's TCP/TLS handshake happens with the **nearby edge** (short round trips), the
+  edge keeps **warm, persistent connections** to your origin over the CDN's well-tuned backbone, and the WAF/DDoS
+  protection still applies. So: static = cached at the edge; dynamic = *proxied* through the edge, not cached.
+
+### 6. Edge computing — running code at the CDN, not just caching
+A normal CDN can only hand back stored files. **Edge computing** lets you run **small pieces of your own code
+in the edge PoPs**, right next to the user — think of the local warehouse not just storing products but having a
+small workshop that can customise them on the spot.
+- **What it's good for:** **stateless, latency-sensitive** logic that would otherwise cost a round trip to the
+  origin — checking an auth token / signed URL, redirects and URL rewrites, A/B-test bucketing, adding security
+  headers, geo-based personalisation ("show prices in ₹ for India"), bot filtering, resizing images.
+- **The products:** **Cloudflare Workers**, **AWS Lambda@Edge** (and the lighter **CloudFront Functions**),
+  **Fastly Compute**.
+- **Why startup time is the whole story — isolates vs containers.** Edge code runs on demand in hundreds of
+  locations, so how fast a fresh copy can start matters enormously.
+  - **Cloudflare Workers** run in **V8 isolates** — the same sandboxing a browser uses to keep tabs apart. An
+    isolate is created *inside an already-running* process, so it starts in **milliseconds or less** with tiny
+    memory; Cloudflare says isolates start roughly **100× faster than a Node process in a container/VM**, which
+    effectively removes the classic **cold start**.
+  - **Fastly Compute** reaches a similar result with **WebAssembly** (not V8), and Fastly reports instance
+    start-up in **microseconds**.
+  - **Container/VM-based functions** (classic AWS Lambda, and Lambda@Edge) must boot a runtime for a new
+    instance — a **cold start** of very roughly **~100 ms to 1 s+** depending on language and package size —
+    then stay warm for later requests.
+- **The constraints (why the origin still exists):** edge functions get **tight CPU-time and memory limits**,
+  there's **no local durable state** (each request may hit a different PoP or a fresh isolate), and edge
+  key-value stores are typically **eventually consistent** (e.g. Cloudflare Workers KV). So the split is:
+  **edge = stateless, fast, per-request decisions; origin = stateful work** — databases, transactions,
+  anything needing strong consistency.
+Interview line: *"I'd validate the token and do the A/B bucketing at the edge to save a round trip, but keep
+the checkout logic and DB writes at the origin."*
+
+### 7. Pull vs push — the two classic scenario answers
+- **News site** (many articles, constantly changing, only some go viral): **pull** — the edge fetches whatever
+  readers actually request; the long tail never wastes edge storage; short TTLs + purge on edit.
+- **Video platform launching a big release** (huge files, predictable demand): **push/pre-warm** the popular
+  files to edges before launch so the first million viewers don't all miss at once — usually with an **origin
+  shield** behind, and **pull** for the long tail of old videos. Real systems mix both.
+
+### 8. Zero-downtime cutover — the "validate" step
+Section D's sequence, with the step people forget: lower TTL (24–48 h ahead, i.e. at least one *old* TTL before)
+→ switch DNS during the low-TTL window → **validate** (watch error rates and traffic shifting to the new IPs,
+keep the old servers serving) → raise the TTL back up once you're confident → drain and retire the old endpoint.
+
+### 9. (Senior) Multi-CDN and egress cost
+Two things that come up once you're big:
+- **Egress cost.** Clouds charge for data **leaving** them ("egress"), and for media-heavy apps bandwidth can be
+  one of the biggest bills. Every CDN cache hit is a byte your origin *didn't* send — so **hit ratio is also a
+  cost metric**, and origin shields + long TTLs + versioned URLs directly lower the egress bill.
+- **Multi-CDN.** Using **two or more CDNs** at once, steered by DNS (weighted or performance-based routing).
+  Why: **availability** — one CDN having a global incident takes you down (this has happened, e.g. Fastly's
+  widespread outage in June 2021); **performance** — different CDNs are stronger in different countries; and
+  **price leverage**. Costs: config, purge, and security rules must be kept identical across vendors, each CDN
+  has its own cold cache (lower combined hit ratio), and debugging spans two vendors.
+
+### 10. LLD bonus — "design a DNS cache"
+A small low-level design that reuses the whole day:
+- **Store:** a hash map `name+type → (records, expires_at)`; on lookup, if `now < expires_at` serve it, else
+  treat as a miss and resolve upstream.
+- **TTL eviction:** expire lazily on read, plus a periodic sweep (or a min-heap ordered by `expires_at`) so dead
+  entries don't eat memory.
+- **Size bound:** cap the entry count and evict **LRU** when full (Day 3).
+- **Negative caching:** store NXDOMAIN answers too, with the SOA-derived negative TTL.
+- **Stampede protection:** if 1,000 queries for the same uncached name arrive together, send **one** upstream
+  query and fan the answer out (request coalescing, Day 3).
 
 ---
 

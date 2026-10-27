@@ -21,9 +21,18 @@ request wanted a different random row, a small cache would almost never help.
 ## Speed gut-feel (memorize these)
 The reason we go to all this trouble is the raw gap in access speed between memory and everything
 else. Burn these into memory — they justify every caching decision:
-- **RAM read: ~100 ns** — where a cache lives.
-- **SSD read: ~100 µs** — about **1,000× slower** than RAM.
+- **RAM reference: ~100 ns** — where a cache lives.
+- **SSD *random* read (one small 4 KB block): ~100–150 µs** (the classic Jeff Dean table says 150 µs) —
+  about **1,000× slower** than a RAM reference.
 - **DB query over the network: ~1–10 ms** — about **10,000–100,000× slower** than RAM.
+
+⚠️ **Precision — the "1,000×" is for RANDOM access only.** If instead you read **1 MB *sequentially***, RAM
+takes **~250 µs** and an SSD **~1 ms** — only about **4× apart**. Why the gap shrinks: a *random* read pays the
+device's fixed **per-operation latency** every single time (find the block, fetch it, hand it back), and for a
+tiny read that fixed cost is almost the whole bill. A *sequential* read pays that setup cost once and then
+**streams** bytes at the device's throughput, where SSDs are much closer to RAM. Caches mostly serve lots of
+small, scattered lookups ("user 42", "post 9001") — i.e. random access — which is exactly where RAM's ~1,000×
+edge is real. (Same framing as Day 15's latency table.)
 
 So serving a value from RAM instead of a network DB query isn't a small win; it's the difference
 between sub-microsecond and multi-millisecond. That multiplier is why caching is one of the first
@@ -136,9 +145,9 @@ capable system; Memcached is the leaner, simpler one.
 
 | | Redis | Memcached |
 |---|---|---|
-| Data structures | Rich (lists / sets / sorted sets / hashes) | Strings only |
-| Persistence | Yes (can save to disk) | No (pure in-memory) |
-| Replication / HA | Yes | No |
+| Data structures | Rich (lists / sets / sorted sets / hashes) | Plain key → opaque value (string/bytes) only |
+| Persistence | Yes (can save to disk — RDB / AOF, see pass-2 section) | No (pure in-memory) |
+| Replication / HA | Yes (replicas + Sentinel, or Redis Cluster) | No built-in replication |
 | Threading | Mostly single-threaded | Multi-threaded |
 
 - **DEFAULT: Redis.** Reach for it when you want **rich data structures** (e.g. a **sorted set** is perfect
@@ -193,10 +202,190 @@ the "match the tool to the problem" judgment lives:
 
 **The dual-write / invalidation-ordering race.** When a write must touch *both* the DB and the cache, **the order matters** — get it wrong and you cache stale data *permanently*. If you **invalidate (delete) the cache first, then write the DB**, a concurrent reader can slip in *after* the delete but *before* your DB write lands: it reads the OLD value from the DB and **repopulates the cache with the stale value** — now the cache is wrong forever. **Safer order: write the DB first, then DELETE the key** (delete, don't *update* — deleting sidesteps a similar race between two concurrent writers' updates). And always keep a **TTL as the backstop** so even a lost race self-heals eventually.
 
-**Distributed caching + consistent hashing tie-in (cross-links Day 9).** When your cache is a *cluster*, how do you decide which node holds a key? The naive answer, `hash(key) % N`, is a trap: change `N` (add or lose one node) and **almost every key remaps to a different node** — that's a self-inflicted **avalanche**, the entire cache effectively cold at once. **Consistent hashing** (keys and nodes placed on a **ring**, with **virtual nodes** for even spread) moves only **~1/N of keys** on a membership change instead of nearly all of them. This is exactly why **Redis Cluster** uses fixed **hash slots** — so scaling the cluster doesn't nuke the cache.
+**Distributed caching + consistent hashing tie-in (cross-links Day 9).** When your cache is a *cluster*, how do you decide which node holds a key? The naive answer, `hash(key) % N`, is a trap: change `N` (add or lose one node) and **almost every key remaps to a different node** — that's a self-inflicted **avalanche**, the entire cache effectively cold at once. **Consistent hashing** (keys and nodes placed on a **ring**, with **virtual nodes** for even spread) moves only **~1/N of keys** on a membership change instead of nearly all of them. **Redis Cluster** solves the same problem with a *different* mechanism — fixed **hash slots** (not a ring; see "Redis HA" in the pass-2 section below) — so scaling the cluster moves only some slots and doesn't nuke the cache.
 
 **Cache hit ratio — the effectiveness metric.** `hit ratio = hits / (hits + misses)`. It's the single number that tells you whether the cache is earning its keep, and it drives your **capacity math**: at a **90% hit ratio**, an incoming **100k read QPS** turns into only **~10k QPS hitting the DB** (the other 90% is served from RAM). That 10× reduction is the whole argument for the cache in a sizing discussion — quote the ratio, then do the multiply.
 
 **When NOT to cache + cache warming.** Caching isn't free, and some data shouldn't be cached at all: **write-heavy, low-reuse data** (you pay to cache it and nobody reads it back) and **data that needs strong consistency** — money, balances, inventory you can't oversell — where a stale read is a correctness bug, not a minor annoyance. Separately, **cache warming** is the practice of **pre-loading known-hot keys at startup** (from a script or a warm-up job) so that right after a deploy or restart you don't serve everyone off a **cold cache** — which would mean a flood of misses and a nasty latency spike exactly when the box is freshest.
 
 **Bloom filter for penetration (alongside null-caching).** Null-caching (storing a "not found" marker) fixes penetration *after* the first miss; a **Bloom filter** rejects the bogus lookup *before* it ever touches the cache or DB. A Bloom filter is a tiny probabilistic structure that answers **"this key definitely does NOT exist"** (or "might exist") in **O(1) time and very little memory**. So for a stream of malicious/nonexistent IDs, you check the filter first: a "definitely not there" answer is rejected instantly, and only *possible* keys are allowed through to the real lookups. (It can have false positives — "might exist" when it doesn't — but never false negatives, which is exactly the guarantee you need here.)
+
+---
+
+## ⭐ Completeness additions (pass 2)
+
+These close the remaining gaps against the Day 3 checklist. Same voice as above: the idea, a small example,
+why it matters, then the line to say in an interview.
+
+### 1. Cache-aside in actual code (with TTL, jitter, null-caching, delete-on-write)
+Everything above is easier to remember once you've seen it as ~20 lines. Python-style pseudocode with Redis:
+
+```python
+import json, random
+
+BASE_TTL = 300                       # 5 minutes
+NULL_MARKER = "__NULL__"             # our "this key does not exist" sentinel
+
+def get_user(user_id):
+    key = f"user:{user_id}"
+    cached = redis.get(key)                      # 1. check the cache first
+    if cached is not None:                       # 2. HIT
+        return None if cached == NULL_MARKER else json.loads(cached)
+
+    user = db.query("SELECT * FROM users WHERE id = %s", user_id)   # 3. MISS -> go to DB
+    if user is None:
+        redis.set(key, NULL_MARKER, ex=60)       # 4a. penetration fix: cache "not found" briefly
+        return None
+    ttl = BASE_TTL + random.randint(0, 60)       # 4b. TTL + jitter (avalanche fix)
+    redis.set(key, json.dumps(user), ex=ttl)     #     store it for the next reader
+    return user
+
+def update_user(user_id, fields):
+    db.execute("UPDATE users SET ... WHERE id = %s", user_id)   # 1. write the DB FIRST
+    redis.delete(f"user:{user_id}")                             # 2. then DELETE (not update) the key
+```
+
+Read it line by line: the read path is the cache-aside flow from the top of the notes; `ex=` is the TTL in
+seconds (Redis expires the key for you); the `random.randint` is **TTL jitter**; the `NULL_MARKER` is
+**null/negative caching** with a deliberately *short* TTL (so if the user is created later, the "not found"
+doesn't linger); and `update_user` uses the **safe order — DB first, then delete** — from the dual-write race
+section. If an interviewer says "write the cache-aside code," this is the answer.
+
+### 2. The two missing eviction policies — MRU and Random
+The earlier list had LRU, LFU, FIFO (+TTL). Two more complete the set:
+- **MRU (Most Recently Used)** — evict the item you touched **most recently**. Sounds backwards, so think of
+  when it's right: a **repeated sequential scan** bigger than the cache (e.g. a job reading rows 1 → 1,000,000
+  over and over). Under LRU, each new row evicts the oldest one — exactly the one the scan will need next lap —
+  so the hit ratio collapses to ~0. MRU keeps the *older* items and throws away the one you just finished with,
+  which you won't need again until the next lap. Niche, but it's the textbook answer to "when is LRU wrong?"
+- **Random** — evict a random key. No bookkeeping at all (no recency list, no counters), so it's the cheapest
+  policy, and when access is fairly uniform it performs close to LRU. Use it when the memory/CPU cost of
+  tracking matters more than squeezing out the last few % of hit ratio.
+
+**How Redis really does it:** Redis has a `maxmemory-policy` setting. The open-source default is
+**`noeviction`** — when memory is full, writes get an **error** instead of evicting anything (fine for a
+database, wrong for a cache!). For a cache you set e.g. **`allkeys-lru`** or **`allkeys-lfu`**; other options
+include `allkeys-random` and `volatile-*` variants (`volatile-lru`, `volatile-lfu`, `volatile-random`,
+`volatile-ttl`) that only evict keys that *have* a TTL set. Redis's LRU/LFU are **approximated**: it samples a
+handful of keys and evicts the best candidate among them rather than keeping a perfect global ordering —
+much cheaper, nearly as good. Interview line: *"I'd set maxmemory with allkeys-lru (or allkeys-lfu for stable
+popularity) — the default noeviction would make writes fail once the cache fills."*
+
+### 3. The full stampede toolkit (name all of them)
+Earlier: single-flight/lock, jittered TTLs, refresh-ahead. The complete menu an interviewer may probe:
+- **Per-key mutex / distributed lock.** On a miss, try to grab a lock for that key; only the winner rebuilds.
+  In Redis: `SET lock:user:42 <token> NX PX 5000` — `NX` = only set if nobody holds it, `PX 5000` = auto-expire
+  in 5 s so a crashed rebuilder can't block everyone forever. Losers wait briefly and re-read the cache (or
+  serve a stale copy). (Safe lock release with a token, and why distributed locks are subtle, is Day 18.)
+- **Request coalescing (a.k.a. single-flight).** The *in-process* version: if 500 requests on the **same app
+  server** miss the same key at once, that server makes **one** DB call and hands the one result to all 500
+  waiters. Cheap, no network lock — but each app server still makes its own one call, so it pairs well with
+  the distributed lock above.
+- **Stale-while-revalidate.** Keep two clocks per entry: a "fresh until" time and a later "hard expiry." Between
+  them, serve the **stale value immediately** and kick off **one background refresh**. Users never wait on the
+  rebuild and the DB sees one query. (Same idea as the HTTP `stale-while-revalidate` directive on Day 4.)
+- **Probabilistic early expiration (XFetch).** Instead of everyone noticing expiry at the same instant, each
+  reader rolls a die: the **closer the key is to expiring** (and the **longer it takes to recompute**), the
+  likelier that *this* reader decides to refresh it **early**. One lucky reader refreshes a bit before the
+  deadline, so under load the key never actually goes cold. The published rule (Vattani et al., VLDB 2015):
+  refresh if `now − δ·β·ln(rand()) ≥ expiry`, where δ = how long a recompute takes and β ≈ 1 (`ln(rand())` is
+  negative, so this adds a random "look-ahead"). No lock needed.
+- **Refresh-ahead** (already above) — a background job refreshes known-hot keys before they expire.
+
+Interview line: *"For a hot key I'd use a per-key lock or request coalescing so only one rebuild hits the DB,
+plus stale-while-revalidate or probabilistic early expiry so the key effectively never goes cold."*
+
+### 4. Redis persistence — RDB vs AOF (and why a *cache* cares)
+A pure cache could lose everything on restart — but then you restart into a **cold cache** and stampede your
+DB. And many teams also keep sessions/leaderboards in Redis, where loss really hurts. Redis has two ways to put
+memory onto disk:
+- **RDB (snapshots).** Every so often (e.g. "every 60 s if ≥1,000 keys changed"), Redis **forks** a child
+  process that writes a compact point-in-time copy of the whole dataset to one file (`dump.rdb`). Like
+  **photographing the whiteboard** every few minutes. ✅ Compact, great for backups, fast restarts. ❌ Crash
+  between snapshots → you lose **everything since the last photo** (often minutes). The fork can also briefly
+  stall a very large instance.
+- **AOF (Append-Only File).** Every write command (`SET`, `INCR`…) is **appended to a log**; on restart Redis
+  **replays the log**. Like **writing every change into a diary**. How often it's forced to disk is
+  `appendfsync`: `always` (safest, slowest), **`everysec` (the default — lose at most ~1 s of writes)**, or
+  `no` (let the OS decide). ✅ Far more durable. ❌ Bigger files, slower restarts; Redis periodically
+  **rewrites/compacts** the log in the background.
+- **Both together** is Redis's own recommendation when you care about the data — AOF for durability, RDB for
+  backups/fast restarts. If both exist, Redis restores from the AOF (the more complete one).
+- Default config: RDB snapshots on; AOF off until you set `appendonly yes`.
+
+Interview line: *"RDB = periodic snapshot, compact but can lose minutes; AOF = write log, loses ≤1 s with
+everysec. For a pure cache I might accept RDB or nothing; for sessions I'd turn on AOF."*
+
+### 5. Redis high availability — Sentinel vs Redis Cluster
+Day 2's SPOF ladder said "Redis is now a SPOF → add replication + failover." Here's the actual machinery.
+- **Replication (the base layer).** One **primary** takes writes; **replicas** copy it (asynchronously) and can
+  serve reads — the single-leader idea from Day 8. But who promotes a replica when the primary dies?
+- **Redis Sentinel = automatic failover for ONE primary.** A small group of **Sentinel** processes (run ≥3 so
+  they can out-vote each other) watch the primary. When a **quorum** of them agree it's down, they **promote a
+  replica** and tell clients the new address (clients ask Sentinel "who's the primary?"). Sentinel gives you
+  **HA but not more capacity** — all data must still fit on, and all writes still go to, one primary.
+- **Redis Cluster = sharding + failover built in.** The keyspace is split into **16,384 hash slots**: each key
+  goes to slot `CRC16(key) mod 16384`, and each primary owns a range of slots (3 primaries ≈ 5,461 slots each).
+  Each primary has replicas, and the cluster itself promotes one if a primary dies — **no Sentinel needed**.
+  Adding a node = **moving some slots** to it, so only those keys relocate (the same "don't remap everything"
+  goal as consistent hashing, achieved with a fixed slot table instead of a ring). Catch: a command touching
+  **several keys needs them in the same slot** — you force that with **hash tags**: `{user42}:cart` and
+  `{user42}:profile` hash only the `user42` part, so they land together.
+- ⚠️ In both, replication is **asynchronous**, so a failover can **lose the last few acknowledged writes**
+  (Day 8's async gap). Fine for a cache; know it for anything else.
+
+Rule of thumb: **data fits on one node and just needs to survive → Sentinel. Data or write load too big for one
+node → Cluster.**
+
+### 6. How does a key find its node? Client-side hashing vs Redis Cluster
+Two ways to organise a distributed cache:
+- **Client-side sharding** (classic **Memcached**): the cache servers don't know about each other. The
+  **client library** hashes each key with **consistent hashing** (ring + virtual nodes, Day 9) to pick a
+  server. Simple servers, but every client must share the same server list and hashing scheme.
+- **Server-side slots** (**Redis Cluster**): the cluster owns the slot map. A cluster-aware client caches the
+  map and goes straight to the right node; if the slot has moved, the node replies **`MOVED`** with the correct
+  address and the client updates its map.
+
+### 7. Redis vs Memcached — the complete decision criteria
+On top of the table above: Redis also has **pub/sub** (and streams), **Lua scripting / atomic multi-step
+operations**, and **configurable eviction policies**; Memcached's selling points are **simplicity** and being
+**multi-threaded**, so one big many-core box scales well for plain `get/set` of blobs. Decision: **need data
+structures, persistence, replication/failover, or pub/sub → Redis (the usual default). Need only a simple,
+large, multi-threaded key→blob cache → Memcached is a perfectly good choice.**
+
+### 8. Multi-level caching — the full layer map, with L1 vs L2
+The layer list near the top skipped one important layer. Nearest to farthest:
+**browser → CDN → app-server L1 (in-process memory) → distributed L2 (Redis/Memcached) → DB buffer pool**.
+- **L1 = in-process** — an LRU map inside each app server's own memory (e.g. Caffeine in Java). No network hop
+  at all: the fastest cache you can have, and the classic hot-key fix.
+- **L2 = shared distributed cache** (Redis) — one network hop (sub-millisecond inside a data center), but *one
+  shared copy* every server sees.
+- **The catch with L1:** there are now **N separate copies** (one per server), each going stale on its own —
+  deleting the Redis key does not clear 50 servers' L1s. So L1 gets **very short TTLs (seconds)**, or you
+  broadcast invalidations (e.g. over Redis pub/sub). Use L1 only for data that tolerates a few seconds of staleness.
+
+### 9. Bloom filter — two caveats interviewers check
+- It only works if you **load every valid key into it** (e.g. all existing user IDs) and **add each new key on
+  creation**. A real key missing from the filter would be wrongly rejected — so keep it in sync.
+- A standard Bloom filter **can't delete** items (clearing bits could erase other keys' bits). Deleted keys just
+  become harmless false positives; if you need deletion, use a counting Bloom filter or rebuild periodically.
+
+### 10. Avalanche when a cache NODE dies (not just mass expiry)
+The avalanche fixes above focus on synchronized expiry. If a whole cache node dies, the fix is **cache HA** —
+replicas + automatic failover (Sentinel/Cluster, section 5) — plus **rate limiting / circuit breakers** in front
+of the DB (Day 14, Day 21) so the DB sheds load instead of collapsing while the cache refills.
+
+### 11. Quick reference (summary — the teaching is above)
+| Problem | What it is | Fixes |
+|---|---|---|
+| Stampede | ONE hot key expires, many rebuild at once | per-key lock, request coalescing, stale-while-revalidate, XFetch, refresh-ahead |
+| Penetration | keys that exist nowhere bypass the cache | null caching (short TTL), Bloom filter, input validation |
+| Avalanche | MANY keys expire together / a node dies | TTL jitter, multi-level cache, HA replicas, circuit breaker/throttling |
+| Hot key | one key overloads one node (no miss involved) | L1 cache, key splitting `key#1..N`, dedicated node |
+
+### 12. Putting it together — "Black Friday is coming, how do you cache?"
+A skeleton answer that uses everything: **warm** the cache with known-hot products before the sale; **L1 + key
+splitting** for the few celebrity products; **TTL jitter** so the warmed keys don't all expire together;
+**stale-while-revalidate / per-key locks** against stampedes; **don't treat cached inventory as truth**
+(strong-consistency data — check stock in the DB at checkout); an **HA cache** (Cluster with replicas); and
+**rate limiting + circuit breakers** in front of the DB as the last line of defense.

@@ -28,9 +28,9 @@
   (DB/Redis) → any server handles any request. This is *why* REST is stateless.
 
 ### Safe vs idempotent methods (interview favorite)
-- **Safe** = read-only, no server change: `GET`.
-- **Idempotent** = N calls == 1 call in effect: `GET`, `PUT`, `DELETE` (delete twice → still gone; put sets a
-  fixed state).
+- **Safe** = read-only, no server change: `GET` (also `HEAD` — GET without the body — and `OPTIONS`).
+- **Idempotent** = N calls == 1 call in effect: `GET`, `HEAD`, `OPTIONS`, `PUT`, `DELETE` (delete twice → still gone;
+  put sets a fixed state). Every safe method is automatically idempotent.
 - **NOT idempotent: `POST`** — each call creates a new thing → "create order" twice = two orders. §3 fixes this.
 
 ## 3. ⭐ Idempotency & idempotency keys (must-know practical)
@@ -207,6 +207,217 @@ Plain request/response has one hard limit: **the client always initiates.** The 
 - **GraphQL authz is FIELD-LEVEL** — add to §4's 👎: because one query can touch many fields/resolvers, you must authorize **per field**, which is harder than REST's simple **per-route** checks.
 
 ---
+
+## ⭐ Completeness additions (pass 2)
+
+### F. HTTP status codes — the taxonomy, explained (not just listed)
+**The idea:** the first digit tells the client **whose problem it is and what to do next** — that's why the right code is
+part of the contract. A client's retry logic, a load balancer's health checks, and your dashboards all key off it.
+- **2xx — it worked.**
+  - `200 OK` — success with a body. `201 Created` — a new resource exists; return it **plus a `Location` header** pointing
+    to it. `202 Accepted` — "got it, I'll do it **asynchronously**" (e.g. a video upload queued for processing — Day 11);
+    return a status URL to poll. `204 No Content` — success, nothing to return (typical `DELETE`).
+- **3xx — look elsewhere.** `301`/`308` moved permanently, `302`/`307` temporarily, `304 Not Modified` — "your cached copy
+  (matched by `ETag`) is still fresh, I'm not resending it" (Day 3/4 caching).
+- **4xx — the CLIENT must change something; retrying the same request won't help** (except `429`).
+  - `400 Bad Request` — malformed: invalid JSON, wrong types, missing required field.
+  - ⭐ **`401 Unauthorized` vs `403 Forbidden`** (the classic trap — the names are misleading):
+    - **401 = "I don't know who you are."** No token, expired token, bad signature → **authentication** failed. Fix: log in /
+      refresh the token. (The server should send a `WWW-Authenticate` header saying how to authenticate.)
+    - **403 = "I know exactly who you are, and you're not allowed."** Valid token, but a regular user calling an admin
+      endpoint → **authorization** failed. Logging in again won't help.
+    - Memory hook: 401 → *authentication* (who), 403 → *authorization* (what you may do). Some APIs return `404` instead of
+      `403` to avoid revealing that a private resource even exists.
+  - `404 Not Found` — no such resource. `405 Method Not Allowed` — e.g. `DELETE` on a read-only collection.
+  - ⭐ **`409 Conflict`** — the request is valid but **clashes with the current state** of the resource: the seat is already
+    booked, a username is taken, an optimistic-lock version mismatch, or (Task 2 above) the same idempotency key is still
+    in progress. Client must re-read state and decide.
+  - **`412 Precondition Failed`** — the client sent `If-Match: <etag>` ("only update if nobody changed it since I read it")
+    and somebody did. HTTP's built-in optimistic concurrency (Day 5).
+  - **`422 Unprocessable Content`** — the JSON is well-formed, but the *meaning* is invalid: `"quantity": -3`, end date before
+    start date. Many APIs use `400` for both — pick one convention and keep it consistent; what matters is the structured
+    error body (G).
+  - ⭐ **`429 Too Many Requests`** — rate limited (Day 14). Include **`Retry-After`** (seconds, or a date) so well-behaved
+    clients know exactly when to come back. The one 4xx that *is* meant to be retried — later.
+- **5xx — the SERVER (or something behind it) failed; the client may retry, with backoff, if the operation is idempotent.**
+  - `500 Internal Server Error` — an unhandled bug/exception.
+  - ⭐ **`502 Bad Gateway`** — a gateway/proxy (Day 13) reached the upstream service but got an **invalid** response (it
+    crashed mid-response, closed the connection, sent garbage).
+  - ⭐ **`503 Service Unavailable`** — the service is **temporarily** unable to handle requests: overloaded, shedding
+    load, in maintenance, no healthy instances. Often with `Retry-After`.
+  - ⭐ **`504 Gateway Timeout`** — a gateway/proxy **waited too long** for the upstream and gave up. Key subtlety: the
+    upstream may **still finish** the work → a blind retry of a non-idempotent `POST` can double-execute it → this is
+    exactly why idempotency keys (§3) exist.
+  - Mnemonic for 502/503/504: **502 = got a bad answer, 503 = nobody can take your call right now, 504 = no answer in time.**
+- **Retry rule of thumb:** don't retry 4xx (fix the request) except `429` (wait `Retry-After`); retry `502/503/504` (and
+  network errors) with exponential backoff + jitter (Day 11 §13), only for idempotent operations or with an idempotency key.
+
+### G. A structured error body — what to actually return
+Never `200 OK` with `{"error": …}` inside, and never a bare string. A standard shape exists: **RFC 9457 "Problem Details for
+HTTP APIs"** (it replaced RFC 7807), served as `Content-Type: application/problem+json`:
+```http
+HTTP/1.1 422 Unprocessable Content
+Content-Type: application/problem+json
+
+{
+  "type": "https://api.example.com/errors/validation-failed",
+  "title": "Request validation failed",
+  "status": 422,
+  "detail": "2 fields are invalid.",
+  "instance": "/orders/req-7f3a91",
+  "errors": [
+    { "field": "quantity",  "message": "must be at least 1" },
+    { "field": "ship_date", "message": "must be in the future" }
+  ],
+  "request_id": "req-7f3a91"
+}
+```
+- `type` — a stable URI identifying the **kind** of error (clients branch on this, not on the human text).
+- `title` — short human summary of that kind; `status` — repeats the HTTP code; `detail` — specifics for *this*
+  occurrence; `instance` — which occurrence (useful in logs).
+- Extra members are allowed by the RFC: `errors` (per-field list for forms) and a `request_id`/trace ID so support
+  can find the exact request in logs (Day 22 observability).
+- Rules: **machine-readable code + human message**, consistent across every endpoint, and **no stack traces or SQL**
+  in production responses (leaks internals — Day 23).
+
+### H. API Gateway vs BFF — explicitly different jobs
+- **API Gateway = ONE front door for ALL clients.** It handles **cross-cutting, client-agnostic** concerns: TLS termination,
+  authentication, rate limiting, routing `/payments/*` to the payment service, logging. It should stay **thin** — no
+  business logic, no per-screen data shaping.
+- **BFF (Backend-for-Frontend) = one small backend PER client type** (web BFF, iOS BFF, Android BFF), usually **owned by that
+  frontend's team**. It does **client-specific** work: calls 4 services, merges the results, trims fields the mobile
+  screen doesn't need, formats for that UI. Why separate per client: the web dashboard wants rich data in one call; the
+  mobile app on a slow network wants a tiny payload — one shared API ends up serving neither well, and every frontend
+  team blocks on one backend team.
+- **How they combine:** `client → API Gateway (auth, rate-limit, TLS) → the right BFF → microservices`. Gateway = generic
+  plumbing for everyone; BFF = tailoring for one.
+- **BFF vs GraphQL:** both solve "different clients want different shapes". GraphQL lets the **client** declare the shape
+  against one schema; a BFF puts that shaping in **server code** per client. Teams often choose one or the other (or a
+  GraphQL server *as* the BFF).
+- And the cousins (Day 13): **load balancer** = spreads traffic across identical instances; **reverse proxy** = sits in front
+  of servers (TLS, caching, compression, routing); **API gateway** = an API-aware reverse proxy (auth, keys, quotas,
+  versioning, transformations). Same position in the diagram, increasing application awareness.
+
+### I. 🛠️ Webhook signature verification — the code (Stripe's scheme)
+§B said "verify the HMAC". Here is exactly how, following Stripe's documented scheme. The `Stripe-Signature` header looks
+like `t=1492774577,v1=5257a869…` — a timestamp plus one or more signatures. Stripe computes **HMAC-SHA256** with your
+endpoint secret over the string **`"{timestamp}.{raw_body}"`**.
+```python
+import hmac, hashlib, time
+
+def verify_webhook(raw_body: bytes, sig_header: str, secret: str, tolerance_sec: int = 300) -> bool:
+    pairs = [item.split("=", 1) for item in sig_header.split(",")]
+    timestamp = next(v for k, v in pairs if k == "t")
+    signatures = [v for k, v in pairs if k == "v1"]          # ignore other schemes (prevents downgrade)
+
+    signed_payload = timestamp.encode() + b"." + raw_body      # "t.body" — exactly what the sender signed
+    expected = hmac.new(secret.encode(), signed_payload, hashlib.sha256).hexdigest()
+
+    if abs(time.time() - int(timestamp)) > tolerance_sec:      # too old → possible replay attack
+        return False
+    return any(hmac.compare_digest(expected, s) for s in signatures)   # constant-time comparison
+```
+Line by line, and **why**:
+- **Parse the header** into the timestamp `t` and the `v1` signatures (there can be several while a secret is being rotated).
+- **Use the RAW body bytes.** If your framework parses and re-serializes the JSON (reordering keys, changing whitespace),
+  the bytes differ and the HMAC won't match. Verify first, parse after.
+- **Sign `timestamp + "." + body`.** Because the timestamp is *inside* the signed data, an attacker can't change it without
+  breaking the signature.
+- **Reject old timestamps** (Stripe's libraries default to a **5-minute** tolerance) → a captured, valid request can't be
+  replayed tomorrow. Keep server clocks in sync (NTP).
+- **`hmac.compare_digest`** compares in **constant time**. A normal `==` stops at the first differing character, and an
+  attacker measuring response times could guess the signature byte by byte (a *timing attack*).
+- After verifying: **dedupe on the event ID** (§B — delivery is at-least-once), **return `2xx` fast**, and do the real work
+  asynchronously via a queue (Day 11) so a slow handler doesn't cause timeouts → retries → more duplicates.
+- On the **sending** side (if you build webhooks): sign the same way, retry failed deliveries with exponential backoff over
+  hours/days (Stripe retries for up to 3 days in live mode), then DLQ/dashboard for manual replay.
+
+### J. Resource modeling — the rules, with examples
+1. **Nouns, not verbs.** `POST /orders`, not `POST /createOrder`. The HTTP method is the verb.
+2. **Plural collections, IDs for items:** `/orders` (the collection) → `/orders/42` (one item).
+3. **Nest only for true ownership, and only one level deep:** `/users/42/orders` ("orders belonging to user 42") is fine;
+   `/users/42/orders/7/items/3/reviews` is not — once an item has its own ID, address it directly: `/reviews/99`.
+4. **Path params identify; query params filter.** Path = *which* resource (required): `/orders/42`. Query = *how* you want the
+   collection (optional): `/orders?status=shipped&sort=-created_at&limit=20`.
+5. **Actions that aren't plain CRUD:** model them as a **state change** or a **sub-resource**:
+   - `PATCH /orders/42 {"status": "cancelled"}`, or
+   - `POST /orders/42/cancellation` (creates a "cancellation" — handy when cancelling has its own data: reason, refund).
+   - Pragmatic fallback some big APIs use: `POST /orders/42/cancel` — acceptable if consistent, but know it's a verb.
+6. **Model what the client needs, not your DB tables.** A "booking" resource may span 3 internal tables; clients shouldn't care.
+
+### K. GraphQL's N+1 problem and DataLoader — worked example
+- **The setup:** query `{ posts(limit: 10) { title author { name } } }`. The `posts` resolver runs **1** query for 10 posts.
+  Then the `author` resolver runs **once per post** → **10 more** queries (`SELECT * FROM users WHERE id = ?` × 10).
+  That's **1 + N** queries — and with nested lists (posts → comments → authors) it multiplies.
+- **Why GraphQL invites it:** each field's resolver is written independently ("given a post, fetch its author"), so the
+  framework naturally calls it once per item.
+- **DataLoader fix (batching + caching per request):**
+  1. Each `author` resolver calls `userLoader.load(post.author_id)` instead of querying — it gets back a promise.
+  2. DataLoader **waits until the current tick of resolvers has run**, collecting all requested IDs: `[7, 3, 7, 12, …]`.
+  3. It **deduplicates** them and issues **one** batched query: `SELECT * FROM users WHERE id IN (3, 7, 12, …)`.
+  4. It hands each resolver its matching user. Result: **2 queries total** instead of 11.
+  - Its cache lives for **one request** only (so it never serves stale data across users).
+- Related GraphQL protections: **query depth / complexity limits** (a malicious deeply-nested query can be very expensive),
+  and **persisted queries** (clients send a hash of a pre-registered query, often via `GET` — which also brings back HTTP caching).
+
+### L. Versioning — what counts as "breaking", and how to retire versions
+- **Non-breaking (safe without a new version):** adding a new endpoint, adding an **optional** request field, adding a
+  new **response** field (clients must ignore unknown fields — say so in your docs).
+- **Breaking (needs a new version):** removing/renaming a field, changing a type (`"price": "9.99"` → `999`), making an
+  optional field required, changing error codes or the meaning of a value.
+- **Strategies:** URL path `/v2/orders` (most visible, easiest to route at the gateway — the common default); header
+  (`Accept: application/vnd.example.v2+json`) — cleaner URLs, harder to test in a browser; query param `?version=2`.
+  Stripe's well-known variant: **date-based versions** pinned per account and overridable per request with a
+  `Stripe-Version` header — they keep old behaviour running for old integrations.
+- **Retiring a version:** announce, add `Deprecation`/`Sunset` response headers with the shutdown date, monitor who still
+  calls v1 (gateway metrics), contact them, then turn it off.
+
+### M. Pagination — the "why" behind offset's slowness, and real cursors
+- **Why offset is slow on deep pages:** `LIMIT 20 OFFSET 1000000` makes the DB **find and throw away 1,000,000 rows** before
+  returning 20. Cost grows with the page number. Keyset/cursor (`WHERE id < :last_id ORDER BY id DESC LIMIT 20`) jumps
+  straight to the spot via the index — page 50,000 costs the same as page 1.
+- **Real cursors need a unique tie-breaker:** sorting by `created_at` alone breaks when two rows share a timestamp (one may be
+  skipped or repeated). Sort by `(created_at, id)` and filter `WHERE (created_at, id) < (:last_created_at, :last_id)` —
+  backed by an index on `(created_at, id)` (Day 10 composite index).
+- **Make the cursor opaque:** return `"next_cursor": "eyJjIjoiMjAyNi0xMC0yN1QxMDowMDowMFoiLCJpIjo5ODd9"` (base64 of the last
+  `(created_at, id)`) rather than raw values, so clients can't build or depend on it and you can change its contents later.
+- Trade-off to state: cursor pagination **can't jump to "page 37"** — fine for feeds/infinite scroll, not for numbered admin tables.
+
+### N. Authentication vs authorization at the API (preview — full treatment Day 23)
+- **Authentication (authn) = who are you?** **Authorization (authz) = what may you do?** (→ 401 vs 403, section F.)
+- **API keys** — a long random secret identifying a calling *application*; simple, typical for server-to-server. Send in a
+  header, never in the URL (URLs end up in logs).
+- **JWT (JSON Web Token)** — a signed token carrying claims (`user_id`, roles, expiry). Any server can **verify the signature
+  without a DB lookup** → stateless (fits §2's statelessness). Downside: hard to revoke before expiry → keep them short-lived
+  and use refresh tokens.
+- **OAuth 2.0** — **delegated** access: "let this app read my Google Calendar" without giving it your password; the app
+  receives a scoped **access token**.
+- **RBAC (Role-Based Access Control)** — permissions attached to roles (`admin`, `editor`, `viewer`); the authz check is
+  "does this user's role allow this action on this resource?"
+- Where: the **gateway** usually does authentication once (verify the token); **services** still do fine-grained
+  authorization ("is this *your* order?") because only they know resource ownership.
+
+### O. Worked example — a Ticketmaster-style booking API (high contention)
+The classic interview prompt that combines everything above. Thousands of users want the same few seats at once.
+```
+GET  /events/{event_id}/seats?section=A          → 200, seat map with status (available / held / sold)
+POST /events/{event_id}/holds                    → reserve seats for a few minutes
+     Idempotency-Key: 7c1e…                        body: {"seat_ids": ["A-12", "A-13"]}
+     → 201 Created  {"hold_id": "h_981", "expires_at": "…+10min"}
+     → 409 Conflict {"type": ".../seat-unavailable", "unavailable": ["A-13"]}
+POST /holds/{hold_id}/purchase                   → pay and convert the hold into a booking
+     Idempotency-Key: 91ab…                        body: {"payment_method": "pm_…"}
+     → 201 Created  {"booking_id": "b_5521"}
+     → 410 Gone (hold expired) / 409 (already purchased) / 402 (payment failed)
+DELETE /holds/{hold_id}                          → 204, release seats early
+```
+- **Why a two-step hold → purchase:** paying takes time (card forms, 3-D Secure). A **temporary hold with an expiry** stops two
+  people paying for the same seat; if the buyer walks away, the hold expires and the seats return automatically.
+- **Contention handled in the data layer, reported via the API:** the hold succeeds only if an atomic conditional update
+  succeeds (`UPDATE seats SET status='held', hold_id=… WHERE seat_id IN (…) AND status='available'` and check the row count,
+  or a Redis `SET seat:A-12 h_981 NX EX 600` per seat) → anyone who loses the race gets **`409 Conflict`**.
+- **Idempotency keys** on both POSTs: a retried "purchase" after a timeout (a `504`!) must never charge twice.
+- **`429` + a virtual waiting room** at the gateway for on-sale spikes (Day 14 rate limiting).
 
 ## Personal Notes (recurring gaps)
 - [ ] ⭐ **#1 GAP, 4 days running — NAME the concept, don't describe/contradict it.** My *implementation* of

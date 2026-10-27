@@ -123,12 +123,23 @@ is still happening then.
 - Classes to know:
   - **Cassandra / DynamoDB = PA/EL** — on **P**artition choose **A**vailability; **E**lse choose **L**atency.
     Speed and uptime first, both during failures and normal operation.
-  - **MongoDB = PC/EC** (tunable) — on **P**artition it chooses **C**onsistency: the primary steps down and
-    the minority side **refuses writes** (consistency over availability); **E**lse it also favors
-    **C**onsistency (reads default to the primary). ⭐ **Nuance — why some sources say PA/EC:** it depends on
-    **write concern.** With `w:majority` a write must be acknowledged by a majority before returning →
-    PC-leaning (won't confirm on the minority side). With `w:1` (ack from the primary only) it leans PA —
-    faster, but a failover can lose that un-replicated write. So the "right" letters follow the config you run.
+  - **MongoDB = it depends on configuration — never state one flat class.** ⭐ The precise answer:
+    *"Classic PACELC tables (Abadi 2012) list MongoDB as **PA/EC**; with `w:majority` writes (the default since
+    MongoDB 5.0) and primary reads it behaves **PC/EC**. The class follows the write concern / read preference
+    you configure."* Why the two answers:
+    - **The "P" half depends on write concern.** MongoDB is single-primary. In a partition, a primary that can't
+      see a majority eventually **steps down**, and the majority side elects a new one. With **`w:1`** (primary-only
+      ack — the old default, which Abadi's 2012 classification reflects) that cut-off primary may have *already
+      said "OK"* to writes no one else has; when it rejoins, those writes are **rolled back** → it stayed
+      *available* but sacrificed consistency → **PA**. With **`w:majority`** a write only returns "OK" once a
+      majority has it, so the minority side can't confirm writes at all → **PC**.
+    - **Since MongoDB 5.0 the implicit default write concern is `w:majority`** (edge case: some replica sets
+      with **arbiters** — when data-bearing voting members aren't more than the voting majority — still
+      default to `w:1`). That's why modern descriptions lean PC/EC.
+    - **The "E" half depends on read preference.** Reads go to the **primary** by default → **EC**. Route reads
+      to **secondaries** and you get lower latency but possibly stale data → **EL**-leaning.
+    - Fine print: the default *read concern* is `"local"`, which can return data that is later rolled back;
+      strict reads use `readConcern: "majority"` or `"linearizable"`.
   - **Distributed RDBMS / Google Spanner = PC/EC** — **C**onsistency always. The cost: it gives up
     availability during a partition, and accepts higher latency during normal operation, all to never be wrong.
 
@@ -278,6 +289,75 @@ of nodes agrees** on it. Now watch what that does during a partition:
 majority, the system makes it **impossible** for two partitioned halves to both accept conflicting writes
 (only one side can ever hold the majority). Consensus is the machinery that turns "we chose C" into a working
 guarantee.
+
+---
+
+## ⭐ Completeness additions (pass 2)
+
+### 7. The PACELC classification table — memorize this as a deliverable
+Interviewers often say "classify X under PACELC." You've now seen the reasoning for each system above; this is
+the **summary to recall** (always say BOTH halves, and the *why*):
+
+| System | PACELC | Why, in one line |
+|---|---|---|
+| **Cassandra** | PA/EL (default; tunable) | Any replica accepts writes; default levels like ONE favor speed. Raise to QUORUM and it moves toward C. |
+| **DynamoDB** | PA/EL (default) | Eventually-consistent reads by default; `ConsistentRead=true` buys C per request. |
+| **Riak** | PA/EL | Dynamo-style leaderless, same reasoning as Cassandra. |
+| **MongoDB** | config-dependent | Abadi 2012: PA/EC (era of `w:1`). With `w:majority` (default since 5.0) + primary reads → PC/EC. |
+| **Google Spanner** | PC/EC | Paxos-replicated, majority quorum per write; pays latency to never be wrong. |
+| **Distributed RDBMS** (sync-replicated) | PC/EC | Consistency first, both in failure and in normal operation. |
+| **HBase / Zookeeper / etcd** | PC/EC (CP systems) | Consensus or a single master per region of data; minority side stops serving. |
+
+Two honest caveats to say out loud: (1) these are **default** classes — most systems let you tune per request
+(section 4); (2) **PC/EL** (Yahoo's PNUTS is Abadi's example) exists but is rare — it means "normally fast and
+possibly stale, but during a partition it refuses rather than diverge."
+
+### 8. Tunable consistency in Cassandra — the full level list (multi-region)
+Section 4 named ONE / QUORUM / ALL. Real deployments span several datacenters (DCs), so Cassandra adds two
+DC-aware levels. Picture replicas in **Mumbai** and **Virginia**:
+- **ONE** — any one replica answers. Fastest, most likely stale.
+- **QUORUM** — a majority of **all** replicas across all DCs. Strong-ish, but a Mumbai write may wait on Virginia
+  (cross-ocean round trip on every request).
+- **LOCAL_QUORUM** — a majority of replicas **in the coordinator's own DC** only. Strong *within* the DC, no
+  cross-ocean wait. ⭐ **The usual production choice for multi-DC** — it's the "region-local quorum" idea from
+  Day 8's F-2.
+- **EACH_QUORUM** (writes) — a majority in **every** DC. Strongest cross-DC durability, slowest.
+- **ALL** — every replica must answer. One dead replica → the request fails (you just gave up availability).
+
+How it connects to the quorum rule: with N=3 per DC, writing and reading at LOCAL_QUORUM (2+2 > 3) gives
+read-your-latest-write **within that DC**. Mechanics of `W + R > N` (and what goes wrong when `W + R ≤ N` —
+the read set can miss the write set, so you may read stale data) are taught fully in **Day 8, section E**.
+
+### 9. Consensus with Raft — one level deeper (full treatment Day 17)
+Section 6 said "a majority must agree." Here's *how* Raft organizes that, in plain terms:
+- **One leader at a time.** Nodes start as followers. If a follower hears no heartbeat from a leader for a
+  (randomized) timeout, it becomes a **candidate** and asks the others for votes.
+- **Terms = numbered eras.** Each election starts a new **term** (term 5, term 6…). A node votes for at most
+  one candidate per term, and a candidate needs a **majority** of votes to win. Since two majorities always
+  overlap, **two leaders can never win the same term**. A leader that sees a higher term number steps down —
+  this is the same "ever-increasing number" idea as Day 8's fencing token.
+- **Log replication.** Clients send writes to the leader; the leader appends them to its log and sends them to
+  followers. An entry is **committed** once a **majority** has stored it — only then is the client told "OK."
+- **Why it's CP:** on the minority side of a partition, no one can collect a majority of votes or acks → no
+  writes commit there. That refusal is the "C over A" choice, enforced by math.
+- **Paxos** solves the same problem (agreement despite failures); Raft was designed to be easier to understand
+  and implement. Real users: **etcd** (Kubernetes), **Consul**, **CockroachDB** use Raft; **Spanner** and
+  **Chubby** use Paxos; **ZooKeeper** uses its own protocol, **ZAB**, which is in the same family.
+
+### 10. Logical clocks — ordering events without trusting wall clocks (intro; full treatment Day 18)
+LWW (section 5) breaks because **server clocks disagree** (clock skew): machine B's clock might be 50 ms behind
+machine A's, so a *later* write can carry an *earlier* timestamp and lose. The fix is to stop asking "what time
+was it?" and ask "what happened **before** what?"
+- **Lamport clock** — every node keeps a counter. Increment it on each event; attach it to every message; when
+  you receive a message, set your counter to `max(mine, received) + 1`. Result: if event A *caused* event B,
+  then A's number < B's number. Mini-example: Alice's post gets counter 7; Bob's reply, sent after reading it,
+  gets 8 or higher — so "reply after question" is preserved. ⚠️ The reverse doesn't hold: a smaller number
+  does **not** prove A caused B; two unrelated events can be numbered in either order.
+- **Vector clock** — each node keeps a **list of counters, one per node**. Comparing two vectors tells you
+  whether one write **happened before** the other or whether they were **concurrent** (neither saw the
+  other) — which is exactly what conflict detection needs (section 5; Day 8 F).
+- **Interview one-liner:** "Wall clocks skew, so I order events with logical clocks — Lamport for a total
+  order consistent with causality, vector clocks when I need to *detect* concurrent writes."
 
 ---
 

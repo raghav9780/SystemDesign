@@ -31,7 +31,7 @@ just beefier. Like replacing your one barista with a superhuman barista who work
   and once you hit it, you're stuck.
 - ❌ **Single Point of Failure (SPOF)** — a SPOF is any one component whose death takes the *whole*
   system down with it. With one box, that box is your SPOF: it dies, everything dies.
-- ❌ **Exponentially expensive at the high end** — the last bit of power costs wildly more than the
+- ❌ **Disproportionately (super-linearly) expensive at the high end** — the last bit of power costs wildly more than the
   first. Doubling a small server is cheap; doubling a top-tier server costs a fortune.
 
 ### 2. Horizontal Scaling (Scale OUT ➡️) — add more machines
@@ -216,6 +216,82 @@ They turn "add more machines" into decisions you can defend with numbers.
   apart (a *partition*), and during that split you can't have both perfect **consistency** (everyone sees
   the same data) *and* full **availability** (everyone still gets an answer) — you must trade one off.
   That's **CAP**, and it's the whole story of → Day 7.
+
+---
+
+## ⭐ Completeness additions (pass 2)
+
+### 1. SLI vs SLO vs SLA — three words for "how reliable are we?"
+The nines above tell you *how much* downtime a percentage means. These three terms tell you *who measures
+what, and who gets in trouble*. Think of a pizza shop promising delivery times:
+- **SLI — Service Level *Indicator*** = the **measurement** itself, a number you actually observe. Pizza
+  example: "% of pizzas delivered within 30 min." System example: **"% of HTTP requests in the last 30 days that
+  returned a non-5xx response in under 300 ms."**
+- **SLO — Service Level *Objective*** = the **internal target** for that SLI. "We aim for 99.9% of requests
+  to succeed under 300 ms over 30 days." It's what your engineering team designs and alerts against. The gap
+  between 100% and the SLO is your **error budget** (99.9% → 0.1% of requests may fail) — spend it on risky
+  deploys; when it's used up, slow down and fix reliability.
+- **SLA — Service Level *Agreement*** = the **external promise with consequences**, usually in a contract:
+  "If monthly availability drops below 99.5%, the customer gets a 10% credit." Note it's normally set
+  **looser than the SLO**, so you get warned (SLO breached) *before* you owe anyone money (SLA breached).
+
+Memory hook: **SLI = what you measure, SLO = what you aim for, SLA = what you promise (and pay for).**
+Interview line: *"I'd define an availability SLI and latency SLI (p99), set SLOs like 99.9% / p99 < 300 ms, and
+keep the customer SLA looser than the SLO."* (Full observability — metrics, logs, traces, alerting on SLOs —
+is Day 22.)
+
+### 2. The AKF Scale Cube — three directions to scale
+A handy picture for "how else can I scale?" — three axes, each a different way to split the work:
+- **X-axis = clone.** Run **N identical copies** of the same thing behind a load balancer. This is plain
+  horizontal scaling of a stateless tier (and read replicas are X-axis for the DB). Easiest; doesn't help if the
+  data itself is too big.
+- **Y-axis = split by function.** Break the app into **different services by job**: a login service, a
+  payments service, a search service — each scaled on its own. This is the microservices direction.
+- **Z-axis = split by data.** Every server runs the same code but owns **a different slice of the data** —
+  users A–M here, N–Z there. This is **sharding** (Day 9).
+
+Real systems combine all three (e.g. a separate payments service [Y], sharded by user [Z], with several copies
+of each shard's app servers [X]). Naming the cube is a nice way to show you know there are more scaling
+dimensions than "add servers."
+
+### 3. Limits of vertical scaling — one more cost: resize downtime
+On top of the ceiling, the SPOF, and the price curve: making one box bigger usually means **stopping it to move
+it to a bigger instance type** (on most clouds, changing the instance size requires a stop/restart). So even the
+"easy" option often costs a **maintenance window** — another reason not to rely on it forever.
+
+### 4. Automated vs manual failover
+Once you have a standby (active-passive above), *who* flips the switch?
+- **Manual failover** — a human gets paged, confirms the primary is really dead, and promotes the standby.
+  Safe from false alarms, but slow: minutes to tens of minutes of downtime, at 3 a.m.
+- **Automated failover** — health checks detect the failure and the system promotes the standby by itself in
+  seconds. Fast, but dangerous if detection is wrong: a primary that's just *slow* might get declared dead
+  while it's still running → two primaries both accepting writes (**split-brain**, covered on Day 8).
+Most production systems automate failover for the stateless tier and use automated-but-carefully-guarded
+failover (quorums, fencing) for databases.
+
+### 5. Object storage — the last two details: flat namespace + metadata, and CDN pairing
+- **Flat namespace + metadata.** Object storage has **no real folders**. A key like `users/42/avatar.jpg`
+  *looks* like a path, but it's just one long name in a giant flat key→object map; the "folders" are a display
+  trick. Each object carries **metadata** (content type, size, custom tags). The flat design is *why* it scales
+  to billions of objects — there's no directory tree to lock or rebalance.
+- **Presigned URLs work for downloads too** — a short-lived signed link lets a user fetch a *private* file
+  directly from storage without making it public.
+- **Pair it with a CDN:** object storage is the **origin**, the CDN caches popular files near users (Day 4).
+  The full pattern: client uploads via presigned URL → object store → DB keeps only the key/URL + metadata →
+  reads served through the CDN.
+
+### 6. "Scale from 1 user to millions" — the whole day as one story
+This is a classic opening question; tell it as a sequence, each step fixing the bottleneck the last one exposed:
+1. **One server** runs web app + DB. Fine for a demo.
+2. **Separate the DB** onto its own machine — the two compete for resources less, and each can be sized on its own.
+3. **Vertical scale** both while it's cheap.
+4. **Load balancer + several stateless web servers** (sessions moved to Redis/JWT) — web-tier SPOF gone.
+5. **Cache** hot reads (Day 3) and put static files in **object storage + CDN** (Day 4).
+6. **Read replicas** for the DB (Day 8); automated failover for the primary.
+7. **Async work via a message queue** (sending emails, resizing images — Day 11) so slow jobs don't block requests.
+8. **Shard** the DB when writes or data size outgrow one primary (Day 9).
+9. **Multiple data centers/regions** with geo-routing (Day 4) for latency and disaster survival.
+Each step: *name the bottleneck, then the fix* — that's the "finish the thought" habit from the Personal Notes below.
 
 ---
 

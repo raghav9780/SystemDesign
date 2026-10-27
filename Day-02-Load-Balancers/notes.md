@@ -53,7 +53,9 @@ Because it understands the request, it can do clever things:
   servers. (One front door, but customers get routed by what they came for.)
 - **SSL termination** — the LB handles the encryption/decryption of HTTPS so the back-end servers don't
   have to. ("SSL" is the encryption layer behind HTTPS; "terminating" it means the secure connection
-  ends *at the LB*.)
+  ends *at the LB*.) Precision: what is L7-only is **reading the HTTP inside** after decrypting. Some L4
+  LBs can also decrypt TLS (e.g. AWS NLB has TLS listeners) but they still route only on IP/port. The
+  three TLS modes — terminate / passthrough / re-encrypt — are in the pass-2 section below.
 - **Caching** — keep a copy of common responses so it can answer without bothering a server.
 - **Compression** — shrink responses before sending them out.
   - ⚠️ **Careful — these last two are NOT features of a *pure* load balancer.** A cloud LB like **AWS
@@ -226,6 +228,116 @@ picks the nearest live one) is preferred when you need *fast* global failover.
   expensive at scale. The cheap trick: **pick 2 servers at random, send to the less-loaded of the two.**
   Surprisingly, this lands **nearly as well as full least-connections** for a tiny fraction of the
   bookkeeping. A great answer to "how do you balance load cheaply across thousands of servers?"
+
+---
+
+## ⭐ Completeness additions (pass 2)
+
+### 1. Where does HTTPS end? TLS termination vs passthrough vs re-encryption
+HTTPS traffic arrives encrypted. The question is **who decrypts it** — and there are exactly three answers.
+Picture a sealed letter arriving at a company mailroom (the LB):
+- **TLS termination (offloading)** — the **LB decrypts** it, reads it, and forwards **plain HTTP** to the
+  backend over the private network. The mailroom opens the letter, reads who it's for, and walks the open
+  letter to the desk. ✅ The LB can do L7 routing (path/header/cookie), and backends are spared the crypto CPU;
+  certificates live in one place. ❌ Traffic is unencrypted inside your network for the last hop.
+- **TLS passthrough** — the LB does **not** decrypt; it forwards the encrypted bytes untouched and the
+  **backend** does the TLS handshake. The mailroom passes the sealed envelope straight on. ✅ End-to-end
+  encryption — the LB never sees plaintext (useful for strict compliance, or when the backend must see the
+  client's certificate itself). ❌ The LB is blind to the content, so it can only route at **L4** — no path
+  routing, no cookie stickiness (it can still route by the hostname in the unencrypted **SNI** field of the
+  handshake on many proxies).
+- **Re-encryption (TLS bridging / end-to-end TLS)** — the LB **decrypts, inspects/routes, then opens a new
+  TLS connection** to the backend. The mailroom opens, reads, then re-seals in a fresh envelope for the internal
+  trip. ✅ L7 smarts **and** encryption on every hop (common in "zero-trust" networks). ❌ Double the crypto
+  work, and certificates to manage on the backends too.
+
+Interview line: *"Default: terminate at the L7 LB. If compliance demands encryption in transit everywhere,
+re-encrypt to the backends; use passthrough only when the LB must never see plaintext — accepting L4-only
+routing."* (Service-to-service **mTLS** is Day 13; the security side is Day 23.)
+
+### 2. WebSockets and other long-lived connections through an LB
+Normal HTTP is "ask, answer, done" — a request occupies a server for milliseconds. A **WebSocket** (a chat
+app, live game, stock ticker — protocol details on Day 12) is one connection that **stays open for minutes or
+hours**, carrying messages both ways. That changes the LB's life in four ways:
+- **It's sticky by nature.** The LB picks a backend **once, when the connection opens**, and every message
+  then flows over that same connection to that same server. No cookie needed — but it also means the LB can't
+  rebalance that user later.
+- **Load gets uneven.** Round robin balances *new connections*, not *current load*. Add a fresh server and it
+  gets zero existing connections — the old servers stay loaded until users happen to reconnect. So use
+  **least connections** (count of open sockets ≈ real load) rather than round robin.
+- **Draining takes ages.** Connection draining waits for in-flight work to finish — but a WebSocket may
+  *never* finish on its own. Deploys therefore either wait a long drain timeout (AWS lets the deregistration
+  delay go up to an hour) or the server **tells clients to reconnect** and closes them in batches.
+- **Reconnect storms + idle timeouts.** If a server holding 50,000 sockets dies, 50,000 clients reconnect at
+  once — clients need **exponential backoff with jitter** (Day 21). And LBs close connections that are silent
+  for too long (AWS ALB's default idle timeout is 60 s), so apps send periodic **heartbeat/ping** messages.
+- **Large uploads** are the same story in miniature: a long transfer pins one connection — which is why the
+  notes above push big uploads **directly to S3 with presigned URLs**, bypassing the LB entirely.
+
+Also, the LB must actually *support* the protocol: the WebSocket handshake is an HTTP request with an
+`Upgrade: websocket` header, which L7 LBs like ALB, Nginx and HAProxy handle; an L4 LB just sees a long TCP
+connection and forwards it.
+
+### 3. The remaining algorithms, and how to choose
+Adding to round robin, weighted RR, least connections, least response time, IP hash, P2C:
+- **Random** — pick any server at random. With many requests it evens out statistically, needs zero state, and
+  is the building block of P2C (pick two at random, keep the better).
+- **Weighted least connections** — least connections, but divide each server's open-connection count by its
+  weight, so a 2× machine is allowed 2× the connections before it counts as "busier."
+- **Consistent hashing** (audit item 3) — as an *algorithm choice*: use it when the **same key should keep
+  hitting the same server** because that server holds something useful for it — a cache shard, an in-memory
+  game room, a user's local data — and you want that affinity to survive servers being added/removed.
+
+Choosing (summary after the teaching above):
+| Situation | Pick |
+|---|---|
+| Identical servers, short similar requests | Round robin (or random) |
+| Mixed server sizes | Weighted RR / weighted least connections |
+| Requests vary a lot in duration, long-lived connections | Least connections |
+| Latency varies by server and you can measure it | Least response time |
+| Thousands of servers, want least-conn quality cheaply | Power of two choices |
+| Same key must reach the same server, fleet changes size | Consistent hashing |
+| Quick stickiness with no cookies | IP hash (with the caveats below) |
+
+### 4. The three ways to make a session sticky
+- **LB-generated cookie** — the LB sets its own cookie on the first response ("you belong to server 3") and
+  reads it on later requests. Works for any app, no code changes. (AWS ALB calls this duration-based stickiness.)
+- **Application cookie** — your app sets its own session cookie and the LB is configured to stick on *that*
+  cookie, so stickiness lasts exactly as long as the app's session.
+- **IP hash** — no cookie at all; works for non-HTTP traffic too. But: many users behind one corporate/mobile
+  **NAT share one IP** and all land on one server (uneven), and a phone switching from Wi-Fi to 4G **changes
+  IP** and loses its server.
+Whichever you use, the downsides from the Sticky Sessions section still apply — the real fix stays
+**stateless servers + shared session store**.
+
+### 5. Global LB: DNS-based vs Anycast-based, and the limits of DNS load balancing
+Audit item 6 introduced GSLB. The two ways to do it:
+- **DNS-based GSLB** — the authoritative DNS returns a different IP per user (geo/latency/weighted/health —
+  the Route 53 policies on Day 4). Simple and flexible. Its **limits**: (1) answers are **cached for the TTL**
+  (and some resolvers ignore it), so failover is slow; (2) DNS sees the **resolver's** location, not the user's,
+  so a user on a far-away public resolver may get a poor choice; (3) the client **doesn't know** whether the IP
+  it cached is healthy; (4) big resolvers serve thousands of users the same answer, so traffic splits are lumpy.
+- **Anycast-based** — one IP announced from every region via BGP; the network delivers each packet to the
+  nearest site, and if a site withdraws its announcement, traffic shifts **without waiting on any DNS cache**.
+  Faster failover, but you need to run your own network edge (or buy it — e.g. AWS Global Accelerator,
+  Cloudflare).
+
+### 6. The full request path — DNS → GSLB → L4 → L7 → backend
+Tie it all together the way an interviewer wants to hear it:
+1. **DNS / GSLB** resolves `api.example.com` to the **best region's** address (or an Anycast IP).
+2. A **L4 LB** (e.g. NLB) in that region takes the raw TCP connections — huge volume, very fast — and spreads
+   them across a fleet of…
+3. **L7 LBs / reverse proxies** (ALB, Nginx, Envoy) that **terminate TLS**, read the path/headers, and route
+   `/api/*` to the API service, `/video/*` to the video service…
+4. …which pick a **healthy backend instance** using an algorithm (least connections, P2C…).
+5. The backend is **stateless** and reads session/data from Redis and the DB.
+At every layer: **health checks** remove dead members, and **every layer runs redundant** (no SPOF).
+
+### 7. Cloud mapping, complete
+AWS's **Elastic Load Balancing (ELB)** is the umbrella name for a family: **ALB** (L7 HTTP/HTTPS/WebSocket),
+**NLB** (L4 TCP/UDP/TLS, very high throughput, static IPs), **GWLB** (Gateway LB — for inserting firewall /
+inspection appliances), and the old **Classic LB** (legacy). Other clouds have equivalents (e.g. GCP Cloud Load
+Balancing, Azure Load Balancer = L4 / Application Gateway = L7).
 
 ---
 

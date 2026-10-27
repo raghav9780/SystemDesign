@@ -173,6 +173,21 @@ Only an issue in multi-leader & leaderless (single-leader never has two writers)
 - This **decouples** "is it safely persisted?" (answered locally, fast) from "is it everywhere on Earth?"
   (eventual, background). The WAN is the expensive part → never block on it.
 - This is exactly how **Spanner / CockroachDB** keep global writes fast: quorum within a nearby zone, async across continents.
+  - ⚠️ **Precision correction (pass 2) — the line above is overstated.** In these systems it's a *configuration
+    choice*, not automatic:
+    - **Region-local quorum is possible when you configure it.** Spanner **regional** configs put all 3 voting
+      replicas in one region (write quorum = 2 of 3, in-region). CockroachDB's default **ZONE survival goal**
+      puts a range's 3 voting replicas in its **home region** → in-region quorum, fast writes — but you can't
+      survive losing that whole region.
+    - **If voting replicas span regions, every write pays the cross-region round trip.** Spanner
+      **multi-region** configs need a quorum that includes replicas outside the leader region, and Google's
+      docs note the added write latency. CockroachDB's **REGION survival goal** (5 voters across ≥3 regions)
+      states write latency rises by at least the round-trip time to the nearest other region.
+    - **Only non-voting replicas lag asynchronously.** Spanner **read-only replicas** and CockroachDB
+      **non-voting replicas** sit in far regions, don't count toward write quorum, and serve fast,
+      possibly-stale reads.
+    - So the honest rule is the same trade as F-2 itself: **local quorum = fast writes but you lose the region
+      if the region dies; cross-region quorum = survive a region loss but pay the WAN on every write.**
 
 ---
 
@@ -214,3 +229,73 @@ We already covered **read-your-writes**, **monotonic reads**, and **consistent-p
   their own action as "missing" and panics.
 - **Fix:** route those specific reads to the **leader**, or use **read-your-writes routing** (pin a user to a replica
   known to be caught up past their last write). Non-critical reads can happily stay on the async replicas.
+
+---
+
+## ⭐ Completeness additions (pass 2)
+
+### 5. Semi-sync in real systems — what it's actually called
+Interviewers like it when you can name the real knob, not just the concept:
+- **MySQL — "semisynchronous replication."** The source waits for at least one replica to say "I've received
+  and logged this change" before telling the client "committed" (how many is a setting, default 1). ⚠️ The
+  catch: if no replica answers within a timeout (default 10 seconds), MySQL **quietly falls back to async**
+  so writes don't hang forever — durability silently weakens until a replica catches up.
+- **PostgreSQL — "synchronous replication."** You list standbys in `synchronous_standby_names`, e.g.
+  `FIRST 1 (replica_a, replica_b)` ("wait for the highest-priority standby in this list that is currently connected" — replica_a if it's up, otherwise replica_b) or `ANY 1 (...)` ("wait for
+  any one"). Waiting for 1 of N is exactly the semi-sync idea. Unlike MySQL, if no synchronous standby is
+  available, Postgres commits **wait** rather than downgrade — it chooses durability over availability.
+- **MongoDB** — the same idea is expressed per write as **write concern**: `w:1` (primary only, async-ish),
+  `w:2` (primary + one secondary ≈ semi-sync), `w:"majority"` (quorum).
+
+### 6. Failover — the full list of what can go wrong
+Section D covered lost writes and split-brain. A real failover has more traps (DDIA Ch. 5 lists these):
+1. **Lost writes (async).** Covered above. Worse, the discarded writes can still have **side effects
+   elsewhere**. Real example DDIA cites (GitHub): a lagging MySQL follower was promoted and re-issued
+   auto-increment IDs the old leader had already handed out; those IDs were also used as keys in Redis, so
+   some private data was shown to the **wrong users**. Lesson: the DB "forgetting" writes isn't contained to the DB.
+2. **Split-brain.** Covered above — fix with majority vote + fencing tokens.
+3. **Choosing the timeout is a no-win dial.** Declare the leader dead too **quickly** and a brief load spike or
+   network hiccup triggers a needless failover (which adds load and can cascade). Too **slowly** and you sit
+   with no writes for that whole period.
+4. **Everyone must learn who the new leader is.** Clients, proxies, and the other followers must all be
+   repointed (service discovery / a virtual IP / a coordination service like ZooKeeper or etcd). Stragglers
+   keep writing to the old address.
+5. **The old leader must rejoin as a follower** — and throw away any writes the new leader never got
+   (that's where lost writes physically disappear).
+- **Interview one-liner:** "Failover risks: lost async writes (with side effects outside the DB), split-brain,
+  a timeout that's either trigger-happy or slow, and clients still pointing at the old leader — so I use a
+  majority-based election, fencing tokens, and semi-sync for at least one durable copy."
+
+### 7. Quorum dials at the extremes, and when `W + R ≤ N`
+Section E gave the rule. Now the three standard settings for **N = 3**, so you can answer "tune it for X":
+- **W = 3, R = 1 (W = N)** — every write must reach all 3 copies, so any single copy is fresh → **fastest
+  reads**. Cost: one dead replica blocks all writes.
+- **W = 1, R = 3 (R = N)** — writes return after 1 ack → **fastest writes**; reads must check all 3 to be sure
+  of the latest. Cost: one dead replica blocks all strong reads.
+- **W = 2, R = 2** — balanced; tolerates one dead replica for both reads and writes. The usual default.
+- **W = 1, R = 1 (`W + R ≤ N`)** — 1 + 1 = 2, not > 3. The write might land only on node A while the read asks
+  only node C → you **read stale data**. That's a legitimate choice (it's eventual consistency, fast and
+  highly available) — just know you've given up the overlap guarantee.
+- ⚠️ **Caveats even when `W + R > N`:** (1) a **sloppy quorum** — when the "home" nodes are down, the write is
+  accepted by *other* nodes as hints (hinted handoff) — means the read set may not overlap the nodes holding
+  the write until the hints are delivered; (2) concurrent writes and partially-failed writes can still produce
+  edge cases. DDIA's summary: quorums make stale reads **unlikely**, not impossible — they don't by themselves
+  give linearizability.
+
+### 8. Replication methods — which real systems use which
+Builds on Extras above (statement / physical WAL / logical row-based):
+- **PostgreSQL streaming replication** ships the **physical WAL** → replicas must run the same major version;
+  Postgres **logical replication** ships row changes and works across versions (and powers CDC tools).
+- **MySQL** replicates via its **binary log (binlog)**, which can be `STATEMENT`, `ROW`, or `MIXED` format;
+  **ROW** has been the default since MySQL 5.7, precisely because statement-based replays of things like
+  `NOW()` or `RAND()` can diverge.
+- **MongoDB** replica sets copy an **oplog** — a log of logical, idempotent operations — from primary to
+  secondaries.
+- **CDC** (Change Data Capture, Day 19) reads these logs (e.g. Debezium reading the Postgres WAL or MySQL binlog)
+  to stream DB changes to Kafka, caches, search indexes.
+
+### 9. Real-system map — additions
+- **MongoDB replica set** → single-leader (one primary, secondaries), automatic election by majority vote.
+- **Spanner / CockroachDB** → per-range consensus groups (Paxos / Raft): every write is a majority-quorum
+  write, so they're "single-leader per shard + quorum" rather than async primary-replica. (See the F-2
+  correction for how replica placement decides write latency.)

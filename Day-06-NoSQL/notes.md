@@ -28,7 +28,12 @@ than SQL; it's SQL with a different set of dials turned. You relax guarantees on
 
 ---
 
-## The 4 NoSQL Types ⭐ (#1 NoSQL interview question — know all 4)
+## The 4 classic NoSQL Types ⭐ (#1 NoSQL interview question — know all 4, then the 2 specialists)
+
+> 📌 **Framing (pass 2):** the textbook answer is **4 classic families** — key-value, document, wide-column,
+> graph — taught below. Modern interviews (2025-26) also expect the two **specialized** families:
+> **time-series** and **vector** databases, covered in "The 5th & 6th families" further down. So the full
+> answer is "**4 classic + time-series + vector**."
 
 There isn't one "NoSQL." It's four very different tools that happen to share the "not-a-relational-table"
 label. The skill is matching the **shape of your data and how you'll read it** to the right type. Walk
@@ -56,6 +61,9 @@ can skip it, no table-alter required.
   time. If it maps cleanly to an object in your code, it maps cleanly to a document.
 - ❌ **Weakness:** weak at transactions or relationships that span *multiple* documents (e.g. atomically
   updating a post doc and a comment doc together).
+  - *Precision note (pass 2):* MongoDB **does** support multi-document ACID transactions (since 4.0 on replica
+    sets, 4.2 on sharded clusters) — but they're slower and the docs recommend modeling so that most updates
+    touch **one document** (single-document writes are always atomic). So "weak," not "impossible."
 
 ### 3. Wide-Column / Column-Family 🧱
 Picture one **enormous, sparse, distributed table** spread across many machines. Data is grouped into
@@ -223,7 +231,7 @@ options, and the trade is exactly the read-vs-write tension from denormalization
   cached copies via **async fan-out**. You get fast reads *and* a clean single source of truth.
 - ⭐ **PRINCIPLE:** denormalization trades **cheap reads for expensive writes** — and the cost is that
   **you** now own keeping the copies in sync (async fan-out, eventual consistency). This exact pattern
-  comes back on **Day 34** (designing the Twitter feed fan-out).
+  comes back on **Day 20** (fan-out push/pull/hybrid) and in the **Phase 3 Twitter/newsfeed design**.
 
 ---
 
@@ -270,7 +278,9 @@ second table, or a **materialized view**."
 
 ### Materialized views / CQRS read models
 When one layout can't serve every query, keep **materialized views** — precomputed, denormalized read-copies shaped
-for a specific query, updated as writes arrive (Cassandra supports these natively). Generalizes to **CQRS** (Command
+for a specific query, updated as writes arrive (Cassandra has a native version, but it's flagged
+**experimental** and disabled by default in recent releases because of consistency bugs — most teams maintain
+the second table themselves from the application or a CDC stream). Generalizes to **CQRS** (Command
 Query Responsibility Segregation): separate the write model from read model(s), each optimized for how it's read,
 kept in sync asynchronously — the same eventual-consistency trade you already accepted with denormalization.
 
@@ -282,10 +292,91 @@ kept in sync asynchronously — the same eventual-consistency trade you already 
    horizontal sharding *and* ACID transactions, so you scale out without giving up strong consistency.
 
 ### Why wide-column is "great for writes" (the mechanism — full detail Day 10)
-It's the **LSM-tree**: writes go to an in-memory memtable + an append-only log (fast **sequential** writes, no
+It's the **LSM-tree**: writes go to an in-memory memtable (a **sorted** structure — e.g. a skip list) + an append-only log (fast **sequential** writes, no
 random seeks), then flush to immutable sorted files (SSTables) merged in the background (compaction). Reads may
 check several files → **Bloom filters** skip files that can't hold a key. That's the engine behind "massive write
 throughput."
+
+---
+
+## ⭐ Completeness additions (pass 2)
+
+### DynamoDB single-table design (how to model relationships with no joins)
+**The idea:** DynamoDB has no joins. So instead of one table per entity (users, orders, items) like SQL, you put
+**several entity types into ONE table** and design the keys so that "everything a screen needs" sits **together
+under the same partition key**, already sorted. One query then fetches it all.
+
+**The two tools:**
+- **Overloaded keys.** The partition key (PK) and sort key (SK) are generic string columns, and you put a
+  *type prefix* in the value. Example rows in one table:
+
+  | PK | SK | other attributes |
+  |---|---|---|
+  | `USER#123` | `PROFILE` | name, email |
+  | `USER#123` | `ORDER#2024-11-02#A91` | total, status |
+  | `USER#123` | `ORDER#2025-01-15#B07` | total, status |
+  | `ORDER#B07` | `ITEM#1` | product_id, qty |
+  | `ORDER#B07` | `ITEM#2` | product_id, qty |
+
+- **Item collection** = all items that share one partition key (everything under `USER#123`). They live
+  together and are stored sorted by SK, so you can read them in one request.
+
+**Modeling 1:many (user → orders):** put the orders under the user's PK with SK `ORDER#<date>#<id>`. Now:
+- "Get user 123's profile + recent orders" → one `Query` on `PK = USER#123`.
+- "Only orders" → `PK = USER#123 AND begins_with(SK, "ORDER#")`.
+- "Orders in 2025, newest first" → SK range `ORDER#2025` … , with descending order. The date inside the SK is
+  what gives you sorting for free.
+
+**Modeling many:many (e.g. students ↔ courses):** store each enrollment as an item **under the student**
+(`PK=STUDENT#7, SK=COURSE#CS101`), then add a **GSI that flips the keys** (GSI PK = `COURSE#CS101`, GSI SK =
+`STUDENT#7`). The base table answers "courses for a student"; the GSI answers "students in a course." This is
+the **adjacency-list pattern**.
+
+**Why it works / the trade:** it's query-first modeling (above) taken to the extreme — you list every access
+pattern, then shape PK/SK/GSIs so each is one `Query`. Fast and cheap at any scale.
+
+**When NOT to use it:**
+- Access patterns are **unknown or changing a lot** (early-stage product, analytics/ad-hoc queries) — every new
+  query may force a key redesign or data migration.
+- The team is new to DynamoDB — the table is hard to read and debug; separate tables per entity are a fine
+  starting point, especially when entities are never fetched together.
+- You need **ad-hoc joins, aggregations, or reporting** → use SQL (or export to an analytics store).
+- Watch partition limits: a single hot `USER#` collection still sits on one partition — the hot-partition rules
+  above still apply.
+
+### Cassandra key design in actual CQL (partition key + clustering columns)
+The query: *"show a user's messages in a chat, newest first."* Design the table *for* that query:
+```sql
+CREATE TABLE messages_by_chat (
+  chat_id    uuid,
+  sent_at    timeuuid,
+  sender_id  uuid,
+  body       text,
+  PRIMARY KEY ((chat_id), sent_at)        -- (partition key), clustering column
+) WITH CLUSTERING ORDER BY (sent_at DESC);
+
+SELECT * FROM messages_by_chat WHERE chat_id = ? LIMIT 50;   -- one partition, already sorted
+```
+- `chat_id` (the **partition key**) decides **which node** holds the data → one chat's messages live together.
+- `sent_at` (the **clustering column**) decides the **order inside** that partition → newest-first for free.
+- Need "messages by sender" too? You do **not** add a join or (usually) a secondary index — you write the data
+  into a **second table** keyed by `sender_id`. Duplication is the price of no joins.
+- ⚠️ A chat with years of messages makes one giant partition → split it with a **time bucket** in the partition
+  key, e.g. `PRIMARY KEY ((chat_id, month), sent_at)`.
+
+### Gossip — how Cassandra nodes know who's alive (brief; full treatment Day 17)
+In a leaderless cluster there's no master keeping a list of members. So how does each node learn which nodes
+exist and which are down? **Gossip**, like rumours spreading in an office:
+- Periodically (Cassandra: about once a second) each node picks **a few random peers** and swaps what it knows:
+  "here's my state, and here's the latest I've heard about everyone else" (with version numbers so newer info wins).
+- Because everyone keeps passing it on, news of a new node or a dead node reaches the **whole cluster in a few
+  rounds** — roughly logarithmic in cluster size — with no central coordinator to fail.
+- **Failure detection** rides on top: if a node hasn't been heard from for a while, peers mark it **down** (Cassandra
+  uses an adaptive "phi accrual" detector rather than a fixed timeout). Down-marking triggers things you already
+  know: **hinted handoff** and routing reads to other replicas (Day 8).
+- **Interview one-liner:** "Leaderless clusters use gossip for membership and failure detection — each node
+  periodically exchanges state with a few random peers, so information spreads cluster-wide in O(log N) rounds
+  with no single point of failure."
 
 ---
 

@@ -120,6 +120,10 @@ return allowed
 requests spend more tokens. `EXPIRE` (≈ full-refill time) evaporates idle keys → no memory leak; a returning user
 re-inits full. *(Simpler `INCR key` + `EXPIRE key 60` exists for fixed-window, but INCR has an atomicity gap
 between increment and expiry, and it's the flawed algorithm — Lua + token bucket is the robust answer.)*
+*(Audit notes: `HMSET` still works but has been **deprecated since Redis 4.0** — modern code writes the same thing
+as `HSET key f1 v1 f2 v2`. And `now` is passed in by each app server, so clock skew between servers can slightly
+distort refills; an alternative is reading Redis's own clock inside the script with `redis.call('TIME')` (OK on Redis 5+, which replicates a script's effects rather than the script) — clocks
+are Day 18.)*
 
 ### 5.3 Client-facing contract (a scored sub-part — don't skip)
 Reject with **HTTP `429 Too Many Requests`** + headers so good clients back off correctly:
@@ -248,3 +252,104 @@ The sliding-window-**log** algorithm maps cleanly onto a Redis **sorted set** of
 - (`ZADD` the new timestamp on admit; set a TTL for cleanup.)
 Accurate but memory-heavy — it stores every request timestamp — which is exactly why sliding-window-*counter*
 exists as the cheaper approximation.
+
+---
+
+## ⭐ Completeness additions (pass 2)
+
+### 5. Sliding window counter — the arithmetic, worked step by step
+**Intuition:** the fixed window forgets the previous minute the instant the clock ticks over — that's the
+boundary bug. The sliding counter says: "the last 60 seconds = all of the current window so far + the *part* of the
+previous window that's still inside my 60-second lookback." We don't know exactly *when* in the previous minute
+those requests came, so we **assume they were spread evenly** and take the proportional share.
+
+**Worked example** (this is Cloudflare's published example). Limit = **50 requests/min**.
+- Previous minute (12:00–12:01): **42** requests. Current minute (12:01–12:02): **18** so far.
+- It's now **12:01:15** — 15 s into the current window. The 60-s lookback (12:00:15 → 12:01:15) still covers the
+  last **45 s** of the previous window → overlap fraction = 45/60 = **0.75**.
+- Estimated rate = previous × 0.75 + current = 42 × 0.75 + 18 = 31.5 + 18 = **49.5**.
+- 49.5 < 50 → **allow**, current becomes 19. The very next request estimates 31.5 + 19 = 50.5 → **reject (429)**.
+
+**Why it's "good enough":** Cloudflare measured this approximation over 400 million requests and found only
+**0.003%** wrongly allowed or limited — near-log accuracy with 2 counters per client.
+Source: https://blog.cloudflare.com/counting-things-a-lot-of-different-things/
+
+⭐ One-liner: "Weighted count = previous × (fraction of the previous window still in view) + current; two integers
+per client, ~0.003% error in Cloudflare's measurements."
+
+### 6. Fixed window done atomically in Redis (the INCR + EXPIRE race, fixed)
+**The bug:** `INCR key` then (separate command) `EXPIRE key 60`. If the app server crashes or the network drops
+between the two, the key has **no TTL** — it never resets, and that client is blocked forever (and the key leaks).
+
+**Fix A — Lua (the version from the Redis docs):** both steps in one atomic script.
+```lua
+-- KEYS[1] = ratelimit:{user42}:<window_number>   ARGV[1] = window seconds (60)
+local current = redis.call('INCR', KEYS[1])          -- create-at-0-then-increment, atomically
+if current == 1 then                                  -- first request in this window
+  redis.call('EXPIRE', KEYS[1], tonumber(ARGV[1]))    -- set the TTL exactly once
+end
+return current                                        -- caller compares to the limit
+```
+Because Redis runs the script without interleaving, "increment" and "set TTL" can't be separated.
+
+**Fix B — no Lua:** wrap both in a transaction, `MULTI` → `INCR key` → `EXPIRE key 60` → `EXEC`, with the
+**window number in the key name** (e.g. `ratelimit:user42:28833334` = epoch-seconds ÷ 60). Re-setting the TTL on
+every call is harmless because each window has its own key. (This is "rate limiter 1" in the Redis INCR docs.)
+
+**What about `SET key 0 EX 60 NX` then `INCR key`?** It mostly works — `SET … NX` creates the key with its TTL in
+one atomic step, and `INCR` keeps an existing TTL. But it's still two commands: if the key expires in the tiny gap
+between them, `INCR` re-creates it **without** a TTL. Rare, but it's why Lua/`MULTI` is the clean answer.
+
+Source: https://redis.io/docs/latest/commands/incr/ (Pattern: rate limiter)
+
+### 7. Redis Cluster + hash tags — keeping multi-key scripts on one node
+**The problem:** Redis Cluster splits the keyspace into **16,384 hash slots** spread across nodes; each key lands
+in a slot based on a hash of its name. A Lua script (or `MULTI`) that touches **two keys in different slots**
+is rejected with a `CROSSSLOT` error — one node can't atomically operate on another node's data.
+
+The sliding window counter needs **two keys** (current window + previous window), so
+`rl:user42:w100` and `rl:user42:w101` could land on different nodes. ❌
+
+**The fix — hash tags:** if a key contains `{…}`, Redis hashes **only the part between the first `{` and the
+following `}`**. So `rl:{user42}:w100` and `rl:{user42}:w101` both hash `user42` → same slot → same node → the
+script works. ✅ (Also: a script must receive every key it touches via `KEYS[]`, not build key names inside the
+script, so the cluster can route it.)
+
+**Bonus:** this also gives you "same client → same shard" for free, which is exactly the sharding rule in the
+checklist. Source: https://redis.io/docs/latest/operate/oss_and_stack/reference/cluster-spec/ (Hash tags)
+
+### 8. Hot key — when ONE abusive client hammers one shard
+**Intuition:** sharding by client works because load spreads across many clients. But one scraper sending 200k
+req/s means 200k ops/s on **the single Redis node that owns its key** — that node saturates and every *other*
+client whose key lives there gets slow too. The limiter itself becomes the victim.
+
+Mitigations (name 2–3):
+- **Local "penalty box" cache** — once a client is over its limit, each gateway node caches "blocked until T"
+  in local memory and rejects without calling Redis at all. Abusive traffic never reaches the shard.
+- **Local pre-limiter** (the hybrid from §6) — a coarse per-node limit absorbs the flood before Redis.
+- **Split the client's budget** — give a known heavy tenant N sub-keys (`{user42:0}`…`{user42:7}`, each with
+  limit/N) on different shards, picked randomly per request. Trades a little accuracy for spread.
+- **Block earlier** — push the abusive IP/key to the WAF/CDN edge (Day 13 §C) so it never reaches the gateway.
+
+⭐ One-liner: "A single abusive client makes its key a hot key on one shard, so I'd cache the block decision
+locally on each gateway node and push persistent abusers to the WAF/CDN."
+
+### 9. Standard rate-limit headers (2025-26 note)
+`429 Too Many Requests` is defined in **RFC 6585 §4**, which says the response **MAY** include `Retry-After` and
+deliberately does **not** define how the server identifies the client or counts requests. The
+`X-RateLimit-Limit/-Remaining/-Reset` headers are a widespread **convention**, not a standard. The IETF is
+standardizing replacements — **`RateLimit-Policy`** (the quota, e.g. `"default";q=100;w=60`) and **`RateLimit`**
+(what's left, e.g. `"default";r=50;t=30`) — in `draft-ietf-httpapi-ratelimit-headers` (still an Internet-Draft as
+of late 2026). In an interview: "429 + Retry-After, plus remaining-quota headers — the X-RateLimit convention, or
+the IETF RateLimit headers being standardized."
+Sources: https://www.rfc-editor.org/rfc/rfc6585#section-4 · https://datatracker.ietf.org/doc/draft-ietf-httpapi-ratelimit-headers/
+
+### 10. (brief) Adaptive limiting / AIMD
+Fixed limits are guesses. **Adaptive** limiters adjust the limit from live health signals, borrowing TCP's
+**AIMD (Additive Increase, Multiplicative Decrease)**: while latency/errors look healthy, raise the allowed
+concurrency by +1; when latency spikes or errors appear, cut it sharply (e.g. halve it). Netflix's open-source
+`concurrency-limits` library is the usual example. Ties to load shedding and resilience (Day 21).
+
+### 11. Memory estimate for the limiter → see Day 15 §8.4
+10M users × ~200 B per token-bucket key ≈ **~2 GB** (×2 with a replica) — memory fits one Redis node; the real
+constraint is **ops/sec**, which is why limiter keys get sharded. The sliding-window **log** would be ~25× more.

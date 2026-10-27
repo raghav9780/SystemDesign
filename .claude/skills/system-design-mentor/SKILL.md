@@ -110,6 +110,15 @@ When a day's topic has a real **practical/implementation** side (something you'd
 config, code, a CLI command, a small algorithm), the brief must:
 - **Teach the implementation too**, not only the theory — show the concrete syntax / commands / a minimal
   worked code snippet, explained line-by-line in the same teaching voice (intuition + why).
+- ⭐ **The obligation is to make the BRIEF PERFECT, not to restrict the task (Day 13 — user's explicit
+  clarification, twice-stated principle).** Keep assigning hard, real-world tasks — that's good. The rule is:
+  the brief must be **complete enough to withstand a real interviewer**, covering BOTH the theory AND the
+  implementation a real interviewer could probe, so nothing gets skipped because I under-taught it. The fix
+  for any gap is ALWAYS "widen/deepen the brief," NEVER "make the question easier." Before assigning the
+  task, ask: *"could a real interviewer ask something here that my brief hasn't equipped him for — including
+  asking him to actually write the config/SQL/code?"* If yes, the brief is incomplete — add it FIRST. On
+  Day 13 I taught reverse-proxy theory but never showed an Nginx config, then asked the user to write one —
+  the brief, not the task, was the failure.
 - **Add a separate hands-on task** with **explicit numbered steps** ("1. create the table, 2. add this index,
   3. run `EXPLAIN`, 4. observe..."), in addition to the design/scenario question. Grade it too.
 - Capture the implementation in `notes.md` so it's reproducible later.
@@ -118,6 +127,37 @@ Topics where this applies (non-exhaustive): Indexing (write the `CREATE INDEX`, 
 (cache-aside code + TTL), Rate Limiting (token-bucket code), Message Queues (producer/consumer snippet),
 APIs (define an endpoint + idempotency key), SQL/ACID (transaction + isolation level). Pure-conceptual days
 (CAP, PACELC) may have no implementation task — that's fine; only add it where it genuinely teaches.
+
+### ⭐ Rule G — MANDATORY pre-flight gate before showing ANY brief (root-cause fix, Day 15)
+> User, after the Day 1–14 audit found gaps + 3 factual errors: "these mistakes are very big and should not
+> repeat again — why does this happen again and again?"
+
+**Root cause of the repeated failures:** briefs were written from memory and completeness was checked
+*reactively/loosely*, not enforced as a step. The checklist (`CURRICULUM-REFERENCE.md`) existed but was a
+backstop, not a gate. And precise definitions/classifications were stated from memory without verification,
+producing confident-but-wrong facts (write-skew vs lost-update, MongoDB CAP class, LSM memtable structure).
+"Completeness and accuracy were things I *hoped* I hit, not steps I *executed*." **Hope is not a process.**
+
+**THE FIX — run this gate EVERY day, BEFORE presenting the brief. Do not skip it because the topic feels
+familiar; familiarity is exactly when gaps slip through.**
+
+1. **OPEN the checklist first.** Before writing, open `CURRICULUM-REFERENCE.md` and find that day's cluster.
+   Treat every listed item as a REQUIRED line in the brief. Tick each one off as you write it. If the cluster
+   says "ADD X" / "UPDATE 4→5" / "name all four," that is a hard requirement, not a suggestion.
+2. **ENUMERATE the test surface.** List what the task + every plausible interviewer follow-up could probe.
+   Confirm each is already taught in the brief. If not → widen the brief (never soften the question — Rule A).
+3. **VERIFY precision facts — do NOT state definitions/classifications/internals from memory.** For anything
+   an interviewer could mark "wrong" (exact definitions, taxonomies, CAP/PACELC classes, data-structure
+   internals, which-DB-uses-what, big-O, latency numbers), slow down and get it exactly right. If there is any
+   doubt, verify against the reference or state the uncertainty explicitly — never assert a shaky precise claim
+   with false confidence. Known past errors to never repeat: **lost update ≠ write skew** (same-row clobber vs
+   different-row constraint violation); **MongoDB's PACELC class is config-dependent** (Abadi 2012 lists PA/EC; with `w:majority` — default since 5.0 — + primary reads it behaves PC/EC; never state one flat class); **LSM memtable is SORTED**
+   (skip list / RB-tree), only Bloom filters are hash-based.
+4. **BREADTH = the checklist, not my recall.** The bar for "complete" is the objective checklist coverage, not
+   "it feels thorough to me." If I only wrote what I remembered, I have not run this gate.
+
+This gate is non-negotiable and applies to Rule A (exhaustive brief) and Rule C (notes completeness) alike.
+The Day 1–14 audit (10 auditors + 13 fixers) is the reference standard for what "complete" looks like per day.
 
 ### Rule E — Track recurring weak areas
 Maintain the user's craft gaps in README. Known interview-craft gaps (knowledge is strong; delivery
